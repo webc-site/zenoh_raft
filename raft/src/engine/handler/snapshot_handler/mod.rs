@@ -1,0 +1,78 @@
+//! This mod handles state machine operations
+
+use display_more::DisplayOptionExt;
+
+use crate::RaftState;
+use crate::RaftTypeConfig;
+use crate::core::sm;
+use crate::engine::Command;
+use crate::engine::EngineOutput;
+use crate::raft_state::LogStateReader;
+use crate::storage::RaftStateMachine;
+use crate::type_config::alias::SnapshotMetaOf;
+
+#[cfg(test)]
+mod trigger_snapshot_test;
+#[cfg(test)]
+mod update_snapshot_test;
+
+/// Handle raft vote related operations
+pub(crate) struct SnapshotHandler<'st, 'out, C, SM = ()>
+where
+    C: RaftTypeConfig,
+    SM: RaftStateMachine<C>,
+{
+    pub(crate) state: &'st mut RaftState<C>,
+    pub(crate) output: &'out mut EngineOutput<C, SM>,
+}
+
+impl<'st, 'out, C, SM> SnapshotHandler<'st, 'out, C, SM>
+where
+    C: RaftTypeConfig,
+    SM: RaftStateMachine<C>,
+{
+    pub(crate) fn new(state: &'st mut RaftState<C>, output: &'out mut EngineOutput<C, SM>) -> Self {
+        Self { state, output }
+    }
+
+    /// Trigger building a snapshot if there is no pending building job.
+    pub(crate) fn trigger_snapshot(&mut self) -> bool {
+        log::debug!("{}", func_name!());
+
+        if self.state.io_state_mut().building_snapshot() {
+            log::debug!("snapshot building is in progress, do not trigger snapshot");
+            return false;
+        }
+
+        log::info!("push snapshot building command");
+
+        self.state.io_state.set_building_snapshot(true);
+
+        self.output
+            .push_command(Command::from(sm::Command::build_snapshot()));
+        true
+    }
+
+    /// Update engine state when a new snapshot is built or installed.
+    ///
+    /// Engine records only the metadata of a snapshot. Snapshot data is stored by
+    /// [`RaftStateMachine`] implementation.
+    ///
+    /// [`RaftStateMachine`]: crate::storage::RaftStateMachine
+    pub(crate) fn update_snapshot(&mut self, meta: SnapshotMetaOf<C>) -> bool {
+        log::info!("update_snapshot: {:?}", meta);
+
+        if meta.last_log_id.as_ref() <= self.state.snapshot_last_log_id() {
+            log::info!(
+                "No need to install a smaller snapshot: current snapshot last_log_id({}), new snapshot last_log_id({})",
+                self.state.snapshot_last_log_id().display(),
+                meta.last_log_id.display()
+            );
+            return false;
+        }
+
+        self.state.snapshot_meta = meta;
+
+        true
+    }
+}

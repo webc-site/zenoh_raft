@@ -1,0 +1,84 @@
+[package]
+name = "zenoh_raft"
+version = "0.1.4"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/webc-site/zenoh_raft"
+homepage = "https://github.com/webc-site/zenoh_raft/tree/main/raft"
+description = "Distributed Raft consensus engine powered by Zenoh transport / 基于 Zenoh 传输层的高性能分布式 Raft 共识引擎"
+keywords = [ "raft", "consensus", "zenoh", "distributed", "replication" ]
+categories = [
+"asynchronous",
+"concurrency",
+"data-structures",
+"database-implementations",
+"network-programming"
+]
+
+[dependencies]
+anyerror = "0.1.13"
+async-watch = "0.3.1"
+backoff-series = "0.1.1"
+bytes = "1.12.1"
+crossfire = "3.1.19"
+data-encoding = "2.11.1"
+display-more = "0.2.6"
+futures-timer = "3.0.4"
+futures-util = "0.3.34"
+itertools = "0.15.0"
+jiff = "0.2.35"
+log = "0.4.34"
+maplit = "1.0.2"
+peel-off = "0.1.1"
+pin-project-lite = "0.2.17"
+rand = "0.10.2"
+rapidhash = "4.5.1"
+rcgen = "0.14.10"
+smallvec = "1.15.2"
+sonic-rs = "0.5.8"
+thiserror = "2.0.20"
+validit = "0.2.6"
+
+[dependencies.bitcode]
+version = "0.6.9"
+features = [ "std", "derive" ]
+
+[dependencies.compio]
+version = "0.19.2"
+features = [ "runtime", "time", "macros" ]
+
+[dependencies.derive_more]
+version = "2.1.1"
+features = [ "full" ]
+
+[dependencies.zenoh]
+version = "1.10.0"
+default-features = false
+
+[dependencies.zenoh_raft_macros]
+version = "0.1.4"
+path = "../macros"
+
+[features]
+default = [ "quic_plain" ]
+quic_plain = [ "zenoh/transport_quic" ]
+quic_tls = [ "zenoh/transport_quic" ]
+
+[dev-dependencies]
+anyhow = "1.0.104"
+ctor = "1.0.13"
+data-encoding = "2.11.1"
+fastrand = "2.5.0"
+log_init = "0.1.39"
+pretty_assertions = "1.4.1"
+rcgen = "0.14.10"
+sonic-rs = "0.5.8"
+urlencoding = "2.1.3"
+
+[dev-dependencies.compio]
+version = "0.19.2"
+features = [ "runtime", "time", "macros" ]
+
+[dev-dependencies.zenoh]
+version = "1.10.0"
+default-features = false

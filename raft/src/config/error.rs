@@ -1,0 +1,77 @@
+use backoff_series::ParseError as BackoffParseError;
+
+use crate::impls::BoxedErrorSource;
+
+/// Error variants related to configuration.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ConfigError {
+    /// Failed to parse configuration from command-line arguments.
+    #[error("ParseError: {source} while parsing ({args:?})")]
+    ParseError {
+        /// The underlying parse error.
+        source: BoxedErrorSource,
+        /// The arguments that failed to parse.
+        args: Vec<String>,
+    },
+
+    /// The min election timeout is not smaller than the max election timeout.
+    #[error("election timeout: min({min}) must be < max({max})")]
+    ElectionTimeout {
+        /// Minimum election timeout value.
+        min: u64,
+        /// Maximum election timeout value.
+        max: u64,
+    },
+
+    /// The `max_payload_entries` configuration must be greater than 0.
+    #[error("max_payload_entries must be > 0")]
+    MaxPayloadIs0,
+
+    /// Election timeout must be greater than heartbeat interval.
+    #[error(
+        "election_timeout_min({election_timeout_min}) must be > heartbeat_interval({heartbeat_interval})"
+    )]
+    ElectionTimeoutLTHeartBeat {
+        /// Minimum election timeout value.
+        election_timeout_min: u64,
+        /// Heartbeat interval value.
+        heartbeat_interval: u64,
+    },
+
+    /// Heartbeat suppression must not delay a heartbeat past a follower's election timeout.
+    #[error(
+        "heartbeat_interval({heartbeat_interval}) + heartbeat_min_interval({heartbeat_min_interval}) + tick interval(heartbeat_interval * 13 / 64) must be < election_timeout_min({election_timeout_min})"
+    )]
+    HeartbeatMinIntervalTooLarge {
+        /// Minimum election timeout value.
+        election_timeout_min: u64,
+        /// Heartbeat interval value.
+        heartbeat_interval: u64,
+        /// Minimum interval between two heartbeats to the same follower.
+        heartbeat_min_interval: u64,
+    },
+
+    /// Invalid snapshot policy string format.
+    #[error("snapshot policy string is invalid: '{invalid:?}' expect: '{syntax}'")]
+    InvalidSnapshotPolicy {
+        /// The invalid policy string provided.
+        invalid: String,
+        /// The expected syntax format.
+        syntax: String,
+    },
+
+    /// Failed to parse a number from string.
+    #[error("{reason} when parsing {invalid:?}")]
+    InvalidNumber {
+        /// The invalid number string.
+        invalid: String,
+        /// The reason for the parse failure.
+        reason: String,
+    },
+
+    /// Invalid backoff policy string.
+    ///
+    /// See [`backoff_series::BackoffSeries::parse`] for the expected format.
+    #[error(transparent)]
+    InvalidBackoff(#[from] BackoffParseError),
+}

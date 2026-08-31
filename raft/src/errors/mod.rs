@@ -1,0 +1,465 @@
+//! Error types exposed by this crate.
+
+mod allow_next_revert_error;
+mod conflicting_log_id;
+pub mod decompose;
+mod error_source;
+mod fatal;
+pub(crate) mod higher_vote;
+pub(crate) mod into_ok;
+pub(crate) mod into_raft_result;
+mod leader_changed;
+mod linearizable_read_error;
+mod membership_error;
+mod node_metadata_changed;
+mod node_not_found;
+mod operation;
+mod precondition_failed;
+mod raft_error;
+mod reject_append_entries;
+mod reject_vote;
+mod replication_closed;
+pub(crate) mod replication_error;
+pub(crate) mod storage_error;
+mod storage_io_result;
+mod streaming_error;
+mod uncommitted_leader_log;
+mod unsupported_membership_transition;
+
+use std::collections::BTreeSet;
+use std::error::Error;
+use std::time::Duration;
+
+pub use self::allow_next_revert_error::AllowNextRevertError;
+pub use self::conflicting_log_id::ConflictingLogId;
+pub use self::error_source::BacktraceDisplay;
+pub use self::error_source::ErrorSource;
+pub use self::fatal::Fatal;
+pub(crate) use self::higher_vote::HigherVote;
+pub use self::leader_changed::LeaderChanged;
+pub use self::linearizable_read_error::LinearizableReadError;
+pub use self::membership_error::MembershipError;
+pub use self::node_metadata_changed::NodeMetadataChanged;
+pub use self::node_not_found::NodeNotFound;
+pub use self::operation::Operation;
+pub use self::precondition_failed::PreconditionFailed;
+pub use self::raft_error::RaftError;
+pub(crate) use self::reject_append_entries::RejectAppendEntries;
+pub use self::reject_vote::RejectVote;
+pub use self::replication_closed::ReplicationClosed;
+pub(crate) use self::replication_error::ReplicationError;
+pub(crate) use self::storage_io_result::StorageIOResult;
+pub use self::streaming_error::StreamingError;
+pub use self::uncommitted_leader_log::UncommittedLeaderLog;
+pub use self::unsupported_membership_transition::UnsupportedMembershipTransition;
+use crate::LogId;
+use crate::Membership;
+use crate::RaftTypeConfig;
+use crate::network::RPCTypes;
+use crate::node::NodeId;
+use crate::type_config::alias::CommittedLeaderIdOf;
+use crate::type_config::alias::LogIdOf;
+use crate::type_config::alias::VoteOf;
+use crate::vote::RaftCommittedLeaderId;
+
+/// Trait for extracting a reference to `ForwardToLeader` from error types.
+pub trait ForwardToLeaderRef<C: RaftTypeConfig> {
+    fn forward_to_leader(&self) -> Option<&ForwardToLeader<C>>;
+}
+
+/// An error related to a client write request.
+#[derive(Debug, Clone, thiserror::Error, derive_more::TryInto, PartialEq, Eq)]
+pub enum ClientWriteError<C>
+where
+    C: RaftTypeConfig,
+{
+    /// This node is not the leader; request should be forwarded to the leader.
+    #[error(transparent)]
+    ForwardToLeader(#[from] ForwardToLeader<C>),
+
+    /// When writing a change-membership entry.
+    #[error(transparent)]
+    ChangeMembershipError(#[from] ChangeMembershipError<CommittedLeaderIdOf<C>, C::NodeId>),
+
+    /// A [`Precondition`] attached to the request is not satisfied.
+    ///
+    /// [`Precondition`]: `crate::raft::Precondition`
+    #[error(transparent)]
+    PreconditionFailed(#[from] PreconditionFailed<C>),
+}
+
+impl<C> ForwardToLeaderRef<C> for ClientWriteError<C>
+where
+    C: RaftTypeConfig,
+{
+    fn forward_to_leader(&self) -> Option<&ForwardToLeader<C>> {
+        match self {
+            Self::ForwardToLeader(f) => Some(f),
+            _ => None,
+        }
+    }
+}
+
+impl<C> ClientWriteError<C>
+where
+    C: RaftTypeConfig,
+{
+    pub fn forward_to_leader(&self) -> Option<&ForwardToLeader<C>> {
+        match self {
+            Self::ForwardToLeader(f) => Some(f),
+            _ => None,
+        }
+    }
+}
+
+/// The set of errors which may take place when requesting to propose a config change.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ChangeMembershipError<CLID, NID>
+where
+    CLID: RaftCommittedLeaderId,
+    NID: NodeId,
+{
+    /// A membership change is already in progress.
+    #[error(transparent)]
+    InProgress(#[from] InProgress<CLID>),
+
+    /// The proposed membership change would result in an empty membership.
+    #[error(transparent)]
+    EmptyMembership(#[from] EmptyMembership),
+
+    /// A learner that should be in the cluster was not found.
+    #[error(transparent)]
+    LearnerNotFound(#[from] LearnerNotFound<NID>),
+
+    /// The proposed membership is not a transition a direct membership append supports.
+    #[error(transparent)]
+    UnsupportedMembershipTransition(#[from] UnsupportedMembershipTransition<NID>),
+
+    /// The leader has not yet committed a log entry proposed in its own term.
+    #[error(transparent)]
+    UncommittedLeaderLog(#[from] UncommittedLeaderLog<CLID>),
+
+    /// The proposed membership changes the metadata of a node id the cluster already knows.
+    #[error(transparent)]
+    NodeMetadataChanged(#[from] NodeMetadataChanged<NID>),
+}
+
+/// The set of errors which may take place when initializing a pristine Raft node.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, derive_more::TryInto)]
+pub enum InitializeError<C>
+where
+    C: RaftTypeConfig,
+{
+    /// Initialization operation is not allowed in the current state.
+    #[error(transparent)]
+    NotAllowed(#[from] NotAllowed<C>),
+
+    /// This node is not included in the initial membership configuration.
+    #[error(transparent)]
+    NotInMembers(#[from] NotInMembers<C>),
+}
+
+/// Error occurs when invoking a remote raft API.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+// C already has serde bound.
+// E still needs additional serde bound.
+pub enum RPCError<C: RaftTypeConfig, E: Error = Infallible> {
+    /// The RPC request timed out.
+    #[error(transparent)]
+    Timeout(#[from] Timeout<C>),
+
+    /// The node is temporarily unreachable and should backoff before retrying.
+    #[error(transparent)]
+    Unreachable(#[from] Unreachable<C>),
+
+    /// Failed to send the RPC request and should retry immediately.
+    #[error(transparent)]
+    Network(#[from] NetworkError<C>),
+
+    /// The remote node returned an error.
+    #[error(transparent)]
+    RemoteError(#[from] RemoteError<C, E>),
+}
+
+impl<C, E> RPCError<C, E>
+where
+    C: RaftTypeConfig,
+    E: Error,
+{
+    /// Returns a weight indicating how severe this error is for backoff purposes.
+    ///
+    /// Higher values indicate more severe errors that should trigger longer backoff.
+    /// - Timeout/Network errors: 2 (transient, retry soon)
+    /// - Unreachable/RemoteError: 100 (more serious, back off longer)
+    pub(crate) fn backoff_rank(&self) -> u64 {
+        match &self {
+            RPCError::Timeout(_) => 2,
+            RPCError::Unreachable(_) => 100,
+            RPCError::Network(_) => 2,
+            RPCError::RemoteError(_) => 100,
+        }
+    }
+}
+
+impl<C, E> RPCError<C, RaftError<C, E>>
+where
+    C: RaftTypeConfig,
+    E: Error,
+{
+    /// Return a reference to ForwardToLeader error if Self::RemoteError contains one.
+    pub fn forward_to_leader(&self) -> Option<&ForwardToLeader<C>>
+    where
+        E: ForwardToLeaderRef<C>,
+    {
+        match self {
+            RPCError::Timeout(_) => None,
+            RPCError::Unreachable(_) => None,
+            RPCError::Network(_) => None,
+            RPCError::RemoteError(remote_err) => remote_err.source.forward_to_leader(),
+        }
+    }
+}
+
+impl<C> RPCError<C>
+where
+    C: RaftTypeConfig,
+{
+    /// Convert to a [`RPCError`] with [`RaftError`] as the error type.
+    pub fn with_raft_error<E: Error>(self) -> RPCError<C, RaftError<C, E>> {
+        match self {
+            RPCError::Timeout(e) => RPCError::Timeout(e),
+            RPCError::Unreachable(e) => RPCError::Unreachable(e),
+            RPCError::Network(e) => RPCError::Network(e),
+        }
+    }
+}
+
+/// Error that occurred on a remote Raft peer.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("error occur on remote peer {target}: {source}")]
+pub struct RemoteError<C, T: Error>
+where
+    C: RaftTypeConfig,
+{
+    /// The node ID of the remote peer where the error occurred.
+    pub target: C::NodeId,
+    /// The node information of the remote peer, if available.
+    pub target_node: Option<C::Node>,
+    /// The error that occurred on the remote peer.
+    pub source: T,
+}
+
+impl<C: RaftTypeConfig, T: Error> RemoteError<C, T> {
+    /// Create a new RemoteError with target node ID.
+    pub fn new(target: C::NodeId, e: T) -> Self {
+        Self {
+            target,
+            target_node: None,
+            source: e,
+        }
+    }
+    /// Create a new RemoteError with target node ID and node information.
+    pub fn new_with_node(target: C::NodeId, node: C::Node, e: T) -> Self {
+        Self {
+            target,
+            target_node: Some(node),
+            source: e,
+        }
+    }
+}
+
+impl<C, E> From<RemoteError<C, Fatal<C>>> for RemoteError<C, RaftError<C, E>>
+where
+    C: RaftTypeConfig,
+    E: Error,
+{
+    fn from(e: RemoteError<C, Fatal<C>>) -> Self {
+        RemoteError {
+            target: e.target,
+            target_node: e.target_node,
+            source: RaftError::Fatal(e.source),
+        }
+    }
+}
+
+/// Error that indicates a **temporary** network error and when it is returned, Openraft will retry
+/// immediately.
+///
+/// Unlike [`Unreachable`], which indicates an error that should backoff before retrying.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("NetworkError: {source}")]
+pub struct NetworkError<C: RaftTypeConfig> {
+    source: C::ErrorSource,
+}
+
+impl<C: RaftTypeConfig> NetworkError<C> {
+    /// Create a new NetworkError from an error.
+    pub fn new<E: Error + 'static>(e: &E) -> Self {
+        Self {
+            source: C::ErrorSource::from_error(e),
+        }
+    }
+
+    /// Create a NetworkError from a string message.
+    pub fn from_string(msg: impl ToString) -> Self {
+        Self {
+            source: C::ErrorSource::from_string(msg),
+        }
+    }
+}
+
+/// Error indicating a node is unreachable. Retries should be delayed.
+///
+/// This error suggests that immediate retries are not advisable when a node is not reachable.
+/// Upon encountering this error, Openraft will invoke [`backoff()`] to implement a delay before
+/// attempting to resend any information.
+///
+/// This error is similar to [`NetworkError`] but with a key distinction: `Unreachable` advises a
+/// backoff period, whereas with [`NetworkError`], Openraft may attempt an immediate retry.
+///
+/// [`backoff()`]: crate::network::RaftNetwork::backoff
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("Unreachable node: {source}")]
+pub struct Unreachable<C: RaftTypeConfig> {
+    source: C::ErrorSource,
+}
+
+impl<C: RaftTypeConfig> Unreachable<C> {
+    /// Create a new Unreachable error from an error.
+    pub fn new<E: Error + 'static>(e: &E) -> Self {
+        Self {
+            source: C::ErrorSource::from_error(e),
+        }
+    }
+
+    /// Create an Unreachable error from a string message.
+    pub fn from_string(msg: impl ToString) -> Self {
+        Self {
+            source: C::ErrorSource::from_string(msg),
+        }
+    }
+}
+
+/// Error indicating that an RPC request timed out.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("timeout after {timeout:?} when {action} {id}->{target}")]
+pub struct Timeout<C: RaftTypeConfig> {
+    /// The type of RPC that timed out.
+    pub action: RPCTypes,
+    /// The node ID that initiated the request.
+    pub id: C::NodeId,
+    /// The target node ID.
+    pub target: C::NodeId,
+    /// The timeout duration that elapsed.
+    pub timeout: Duration,
+}
+
+/// Error indicating that the request should be forwarded to the leader.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("has to forward request to: {leader_id:?}, {leader_node:?}")]
+pub struct ForwardToLeader<C>
+where
+    C: RaftTypeConfig,
+{
+    /// The node ID of the current leader, if known.
+    pub leader_id: Option<C::NodeId>,
+    /// The node information of the current leader, if known.
+    pub leader_node: Option<C::Node>,
+}
+
+impl<C> ForwardToLeader<C>
+where
+    C: RaftTypeConfig,
+{
+    /// Create a ForwardToLeader error with no known leader information.
+    pub const fn empty() -> Self {
+        Self {
+            leader_id: None,
+            leader_node: None,
+        }
+    }
+
+    /// Create a ForwardToLeader error with known leader information.
+    pub fn new(leader_id: C::NodeId, node: C::Node) -> Self {
+        Self {
+            leader_id: Some(leader_id),
+            leader_node: Some(node),
+        }
+    }
+}
+
+/// Error indicating that not enough nodes responded to form a quorum.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("not enough for a quorum, cluster: {cluster}, got: {got:?}")]
+pub struct QuorumNotEnough<C: RaftTypeConfig> {
+    /// A description of the cluster membership.
+    pub cluster: String,
+    /// The set of nodes that responded.
+    pub got: BTreeSet<C::NodeId>,
+}
+
+/// Error indicating a membership change is already in progress.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "the cluster is already undergoing a configuration change at log {membership_log_id:?}, last committed membership log id: {committed:?}"
+)]
+pub struct InProgress<CLID>
+where
+    CLID: RaftCommittedLeaderId,
+{
+    /// The log ID of the last committed membership change.
+    pub committed: Option<LogId<CLID>>,
+    /// The log ID of the membership change currently in progress.
+    pub membership_log_id: Option<LogId<CLID>>,
+}
+
+/// Error indicating a learner node was not found in the cluster.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("Learner {node_id} not found: add it as learner before adding it as a voter")]
+pub struct LearnerNotFound<NID>
+where
+    NID: NodeId,
+{
+    /// The node ID of the learner that was not found.
+    pub node_id: NID,
+}
+
+/// Error indicating an operation is not allowed in the current state.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "not allowed to initialize due to current raft state: last_log_id: {last_log_id:?} vote: {vote}"
+)]
+pub struct NotAllowed<C: RaftTypeConfig> {
+    /// The last log ID in the current state.
+    pub last_log_id: Option<LogIdOf<C>>,
+    /// The current vote state.
+    pub vote: VoteOf<C>,
+}
+
+/// Error indicating a node is not a member of the cluster.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("node {node_id} has to be a member. membership:{membership:?}")]
+pub struct NotInMembers<C>
+where
+    C: RaftTypeConfig,
+{
+    /// The node ID that is not in the membership.
+    pub node_id: C::NodeId,
+    /// The current cluster membership.
+    pub membership: Membership<C::NodeId, C::Node>,
+}
+
+/// Error indicating an empty membership configuration was provided.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("new membership cannot be empty")]
+pub struct EmptyMembership {}
+
+/// An error type that can never occur, used as a placeholder for infallible operations.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("infallible")]
+pub enum Infallible {}
+
+/// A placeholder to mark RaftError won't have a ForwardToLeader variant.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("no-forward")]
+pub enum NoForward {}
