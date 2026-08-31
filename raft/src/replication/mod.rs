@@ -1,0 +1,522 @@
+//! Replication stream.
+
+mod backoff_consumer;
+pub(crate) mod backoff_state;
+pub(crate) mod event_watcher;
+pub(crate) mod inflight_append;
+pub(crate) mod inflight_append_queue;
+pub(crate) mod payload;
+pub(crate) mod replicate;
+pub(crate) mod replication_context;
+pub(crate) mod replication_handle;
+pub(crate) mod replication_progress;
+mod replication_session_id;
+pub(crate) mod response;
+pub(crate) mod snapshot_transmitter;
+pub(crate) mod snapshot_transmitter_handle;
+pub(crate) mod stream_context;
+pub(crate) mod stream_state;
+
+use std::fmt;
+use std::sync::Arc;
+use std::time::Duration;
+
+use display_more::DisplayOptionExt;
+use futures_util::FutureExt;
+use futures_util::StreamExt;
+use payload::Payload;
+use replication_progress::ReplicationProgress;
+pub(crate) use replication_session_id::ReplicationSessionId;
+pub(crate) use response::Progress;
+
+/// Fallback delay used when a [`Backoff`](crate::network::Backoff) iterator is exhausted.
+pub(crate) const EXHAUSTED_BACKOFF_DELAY: Duration = Duration::from_millis(500);
+use response::ReplicationResult;
+use stream_state::StreamState;
+
+use crate::RaftNetworkFactory;
+use crate::RaftTypeConfig;
+use crate::base::BoxStream;
+use crate::display_ext::display_instant::DisplayInstantExt;
+use crate::errors::RPCError;
+use crate::errors::ReplicationClosed;
+use crate::log_id_range::LogIdRange;
+use crate::network::NetBackoff;
+use crate::network::NetStreamAppend;
+use crate::network::RPCOption;
+use crate::progress::inflight_id::InflightId;
+use crate::raft::AppendEntriesRequest;
+use crate::raft::StreamAppendError;
+use crate::raft::StreamAppendResult;
+use crate::raft_state::IOId;
+use crate::replication::backoff_state::BackoffState;
+use crate::replication::event_watcher::EventWatcher;
+use crate::replication::inflight_append_queue::InflightAppendQueue;
+use crate::replication::replication_context::ReplicationContext;
+use crate::replication::stream_context::StreamContext;
+use crate::storage::RaftLogStorage;
+use crate::type_config::TypeConfigExt;
+use crate::type_config::alias::InstantOf;
+use crate::type_config::alias::JoinHandleOf;
+use crate::type_config::alias::MutexOf;
+use futures_util::stream::unfold;
+use std::pin::pin;
+
+/// A task responsible for sending replication events to a target follower in the Raft cluster.
+///
+/// NOTE: we do not stack replication requests to targets because this could result in
+/// out-of-order delivery. We always buffer until we receive a success response, then send the
+/// next payload from the buffer.
+pub(crate) struct ReplicationCore<C, N, LS>
+where
+    C: RaftTypeConfig,
+    N: RaftNetworkFactory<C>,
+    LS: RaftLogStorage<C>,
+{
+    /// Shared context containing node IDs, session info, and notification channel.
+    replication_context: ReplicationContext<C>,
+
+    /// State shared with the request stream generator, protected by a mutex.
+    stream_state: Arc<MutexOf<C, StreamState<C, LS>>>,
+
+    /// A channel for receiving events from the RaftCore and snapshot transmitting task.
+    event_watcher: EventWatcher<C>,
+
+    /// The next replication payload to send, set when partially completed.
+    next_action: Option<Payload<C>>,
+
+    /// Identifies the current in-flight replication batch for progress tracking.
+    inflight_id: Option<InflightId>,
+
+    /// The network interface for replicating logs and heartbeat.
+    network: Option<N::Network>,
+
+    /// The log replication state tracking progress and matching logs for the follower.
+    replication_progress: ReplicationProgress<C>,
+
+    /// Backoff state for rate-limiting retries on persistent errors.
+    ///
+    /// Encapsulates both the accumulated error rank and the shared backoff iterator
+    /// handed to [`StreamState`] via
+    /// [`BackoffState::consumer`](crate::replication::backoff_state::BackoffState::consumer).
+    /// See [issue #1723](https://github.com/databendlabs/openraft/issues/1723) for the
+    /// invariant these two pieces must maintain together.
+    backoff_state: BackoffState,
+}
+
+impl<C, N, LS> ReplicationCore<C, N, LS>
+where
+    C: RaftTypeConfig,
+    N: RaftNetworkFactory<C>,
+    LS: RaftLogStorage<C>,
+{
+    /// Spawn a new replication task for the target node.
+    pub(crate) fn spawn(
+        replication_context: ReplicationContext<C>,
+        progress: ReplicationProgress<C>,
+        network: N::Network,
+        log_reader: LS::LogReader,
+        event_watcher: EventWatcher<C>,
+    ) -> JoinHandleOf<C, Result<(), ReplicationClosed>> {
+        log::debug!(
+            "spawn replication: session_id={}, target={}, committed={}, matching={}",
+            replication_context.stream_id,
+            replication_context.target,
+            progress.local_committed.display(),
+            progress.remote_matched.display()
+        );
+
+        let backoff_state = BackoffState::new();
+
+        let this = Self {
+            replication_context: replication_context.clone(),
+            stream_state: Arc::new(MutexOf::<C, _>::new(StreamState {
+                replication_context,
+                event_watcher: event_watcher.clone(),
+                log_reader,
+                payload: None,
+                inflight_id: None,
+                backoff_consumer: backoff_state.consumer(),
+            })),
+            inflight_id: None,
+            event_watcher,
+            network: Some(network),
+            replication_progress: progress,
+            backoff_state,
+            next_action: None,
+        };
+
+        C::spawn(this.main())
+    }
+
+    /// Creates a stream of AppendEntries requests from the given context.
+    fn new_request_stream(
+        stream_context: StreamContext<C, LS>,
+    ) -> BoxStream<'static, AppendEntriesRequest<C>> {
+        let strm = unfold(stream_context, Self::next_append_request);
+        Box::pin(strm)
+    }
+
+    /// Generates the next AppendEntries request and records it in the inflight queue.
+    ///
+    /// Used as the unfold function for the request stream.
+    async fn next_append_request(
+        stream_context: StreamContext<C, LS>,
+    ) -> Option<(AppendEntriesRequest<C>, StreamContext<C, LS>)> {
+        let res = {
+            let mut state = stream_context.stream_state.as_ref().lock().await;
+            state.next_request().await
+        };
+
+        let req = match res {
+            Ok(Some(req)) => req,
+            Ok(None) => return None,
+            Err(err) => {
+                let mut fatal_error = stream_context.fatal_error.lock().await;
+                *fatal_error = Some(err);
+                return None;
+            }
+        };
+
+        stream_context.inflight_append_queue.push(req.last_log_id());
+
+        Some((req, stream_context))
+    }
+
+    /// Main replication loop that sends AppendEntries requests and processes responses.
+    async fn main(mut self) -> Result<(), ReplicationClosed> {
+        // Avoid holding a mut ref to self during streaming.
+        let mut network = self.network.take().unwrap();
+
+        // reset the streaming state
+        self.next_action = None;
+        self.inflight_id = None;
+
+        loop {
+            log::debug!(
+                "ReplicationCore: new stream start, next_action = {:?}",
+                self.next_action
+            );
+
+            self.ensure_still_leading()?;
+
+            // Kept separate from `on_error` because only this scope holds a reference
+            // to `network`, which is needed to construct the `Backoff` iterator.
+            // If the network returns None, fall back to the policy configured in `Config::backoff`.
+            let config = self.replication_context.config.clone();
+            self.backoff_state
+                .reconcile(|| network.backoff().unwrap_or_else(|| config.build_backoff()));
+
+            let mut payload = self.select_next_payload().await?;
+
+            if !self.run_stream_session(&mut network, &payload).await? {
+                continue;
+            }
+
+            // if partial success is returned, not all data is exhausted. keep sending
+            payload.update_matching(self.replication_progress.remote_matched.clone());
+            if payload.len() != Some(0) {
+                self.next_action = Some(payload);
+            } else {
+                // Payload is all sent.
+                self.inflight_id = None;
+            }
+        }
+    }
+
+    /// Check the two reasons this task must stop before opening another stream: the leader
+    /// dropped its handle, or a different leader has taken over locally.
+    fn ensure_still_leading(&mut self) -> Result<(), ReplicationClosed> {
+        let canceled = self.replication_context.cancel_rx.changed().now_or_never();
+        if canceled.map(|x| x.is_err()) == Some(true) {
+            log::info!("ReplicationCore: canceled, quit");
+            return Err(ReplicationClosed::new("canceled"));
+        }
+
+        let accepted_io: IOId<C> = self.event_watcher.io_accepted_rx.borrow_watched().clone();
+        if self.replication_context.leader_changed(&accepted_io) {
+            return Err(ReplicationClosed::new("Leader changed"));
+        }
+
+        Ok(())
+    }
+
+    /// Decide what the next stream should carry.
+    ///
+    /// With nothing left over, block until [`RaftCore`] hands over work. With a payload still
+    /// unfinished, adopt whatever [`RaftCore`] has since published instead: in `LogsSince` mode a
+    /// reverted log makes the unfinished payload obsolete, so resuming it would send entries that
+    /// no longer exist.
+    ///
+    /// [`RaftCore`]: crate::core::RaftCore
+    async fn select_next_payload(&mut self) -> Result<Payload<C>, ReplicationClosed> {
+        if self.next_action.is_none() {
+            self.drain_events().await?;
+        } else {
+            // If there is new data to send, even when the current data is not yet finished sending
+            // discard the current data, start to send the new data.
+            // When data is reverted in LogsSince mode, it needs such a mechanism.
+            //
+            // `borrow_and_update()` marks the value as seen; a plain `borrow_watched()`
+            // would leave the change notification pending, and `drain_events()` would
+            // later observe it and replay the same command, re-running an
+            // already-acknowledged payload.
+            let new_data = self.event_watcher.replicate_rx.borrow_and_update().clone();
+            if self.inflight_id != Some(new_data.inflight_id) {
+                log::info!(
+                    "ReplicationCore replaced current data with inflight id {:?} with new {}",
+                    self.inflight_id,
+                    new_data.inflight_id
+                );
+                self.inflight_id = Some(new_data.inflight_id);
+                self.next_action = Some(new_data.payload);
+            }
+        }
+
+        Ok(self.next_action.take().unwrap())
+    }
+
+    /// Stream `payload` to the target and consume the responses.
+    ///
+    /// Returns whether the response stream was consumed to its end; `false` means the caller
+    /// should back off and open a new stream, leaving `payload` unacknowledged. An `Err` is fatal
+    /// and ends the task.
+    async fn run_stream_session(
+        &mut self,
+        network: &mut N::Network,
+        payload: &Payload<C>,
+    ) -> Result<bool, ReplicationClosed> {
+        {
+            let mut stream_state = self.stream_state.lock().await;
+            stream_state.payload = Some(payload.clone());
+            stream_state.inflight_id = self.inflight_id;
+        }
+
+        let inflight_queue = InflightAppendQueue::new();
+        let fatal_error = Arc::new(MutexOf::<C, _>::new(None));
+
+        let stream_context = StreamContext {
+            stream_state: self.stream_state.clone(),
+            inflight_append_queue: inflight_queue.clone(),
+            fatal_error: fatal_error.clone(),
+        };
+
+        let req_strm = Self::new_request_stream(stream_context);
+
+        let rpc_timeout = Duration::from_millis(self.replication_context.config.heartbeat_interval);
+        let option = RPCOption::new(rpc_timeout);
+
+        let resp_strm_res = network.stream_append(req_strm, option).await;
+        // A custom streaming transport may poll the request stream while establishing
+        // `stream_append()` and then still return an RPC error. Check the fatal marker here too,
+        // because in that case there is no response stream for `handle_response_stream()` to
+        // consume.
+        if let Some(err) = Self::take_stream_fatal_error(&fatal_error).await {
+            return Err(err);
+        }
+
+        let resp_strm = match resp_strm_res {
+            Ok(resp_strm) => resp_strm,
+            Err(rpc_err) => {
+                self.backoff_state.on_error(rpc_err.backoff_rank());
+                self.send_progress_error(rpc_err, "initiate-stream-replication")
+                    .await;
+
+                return Ok(false);
+            }
+        };
+
+        let res = self.handle_response_stream(resp_strm, inflight_queue).await;
+        if let Some(err) = Self::take_stream_fatal_error(&fatal_error).await {
+            return Err(err);
+        }
+
+        // Response stream is successfully exhausted.
+        Ok(res.is_ok())
+    }
+
+    async fn take_stream_fatal_error(
+        fatal_error: &Arc<MutexOf<C, Option<ReplicationClosed>>>,
+    ) -> Option<ReplicationClosed> {
+        let mut fatal_error = fatal_error.lock().await;
+        fatal_error.take()
+    }
+
+    async fn handle_response_stream<'s>(
+        &mut self,
+        resp_strm: BoxStream<'s, Result<StreamAppendResult<C>, RPCError<C>>>,
+        inflight_queue: InflightAppendQueue<C>,
+    ) -> Result<(), &'static str> {
+        let mut resp_strm = pin!(resp_strm);
+        let mut cancel_rx = self.replication_context.cancel_rx.clone();
+
+        loop {
+            let rpc_res = {
+                let next_resp = resp_strm.next();
+                let cancel = cancel_rx.changed();
+
+                futures_util::select! {
+                    rpc_res = next_resp.fuse() => rpc_res,
+                    cancel_res = cancel.fuse() => {
+                        log::info!("ReplicationCore: canceled while waiting response: {:?}", cancel_res);
+                        return Err("canceled");
+                    }
+                }
+            };
+
+            let Some(rpc_res) = rpc_res else {
+                return Ok(());
+            };
+
+            log::debug!("AppendEntries RPC response: {:?}", rpc_res);
+
+            self.backoff_state.observe(&rpc_res);
+            let append_res = match rpc_res {
+                Ok(stream_append_res) => stream_append_res,
+                Err(rpc_err) => {
+                    self.send_progress_error(rpc_err, "stream-replication")
+                        .await;
+                    return Err("RPCError");
+                }
+            };
+
+            match append_res {
+                Ok(matching) => {
+                    let last_acked_sending_time = inflight_queue.drain_acked(&matching);
+
+                    if let Some(last) = last_acked_sending_time {
+                        self.notify_heartbeat_progress(last).await;
+                    }
+
+                    self.replication_progress.remote_matched = matching.clone();
+
+                    self.notify_progress(ReplicationResult(Ok(matching))).await;
+                }
+                Err(append_err) => {
+                    match append_err {
+                        StreamAppendError::Conflict(conflict_log_id) => {
+                            self.notify_progress(ReplicationResult(Err(conflict_log_id)))
+                                .await;
+                        }
+                        StreamAppendError::HigherVote(higher) => {
+                            self.replication_context.notify_higher_vote(higher).await;
+                        }
+                    }
+
+                    return Err("AppendError");
+                }
+            }
+        }
+    }
+
+    /// Send the error result to RaftCore.
+    /// RaftCore will then submit another replication command.
+    async fn send_progress_error(&mut self, err: RPCError<C>, when: impl fmt::Display) {
+        log::warn!(
+            "ReplicationCore recv RPCError: {}, when:({}); sending error to RaftCore",
+            err,
+            when
+        );
+
+        // no inflight id means there is no payload is sent, and no one is waiting the response, no need to
+        // report.
+        if self.inflight_id.is_none() {
+            return;
+        }
+        self.replication_context
+            .notify_progress(Err(err.to_string()), self.inflight_id)
+            .await;
+    }
+
+    /// A successful replication implies a successful heartbeat.
+    /// This method notifies [`RaftCore`] with a heartbeat progress.
+    ///
+    /// [`RaftCore`]: crate::core::RaftCore
+    async fn notify_heartbeat_progress(&mut self, sending_time: InstantOf<C>) {
+        log::debug!(
+            "ReplicationCore notify_heartbeat_progress: {}",
+            sending_time.display()
+        );
+        self.replication_context
+            .notify_heartbeat_progress(sending_time)
+            .await;
+    }
+
+    /// Notify RaftCore with the success replication result (log matching or conflict).
+    async fn notify_progress(&mut self, replication_result: ReplicationResult<C>) {
+        log::debug!(
+            "{}: target={}, curr_matching={}, result={}, inflight_id={}",
+            func_name!(),
+            self.replication_context.target,
+            self.replication_progress.remote_matched.display(),
+            replication_result,
+            self.inflight_id.display()
+        );
+
+        match &replication_result.0 {
+            Ok(matching) => {
+                self.replication_progress.remote_matched = matching.clone();
+
+                // No need to notify
+                if matching.is_none() {
+                    return;
+                }
+            }
+            Err(_) => {
+                // Conflict is not allowed to be less than the current matching.
+            }
+        }
+
+        // always send Conflict error back, even when the inflight id is None
+        // for heartbeat to detect log reversion
+        self.replication_context
+            .notify_progress(Ok(replication_result), self.inflight_id)
+            .await;
+    }
+
+    /// Receive and process events from RaftCore and set `next_action` and `inflight_id`.
+    ///
+    /// - For log entries: sets `inflight_id = Some(id)` and `next_action = Some(payload)`
+    /// - For committed update: sets `inflight_id = None` and `next_action =
+    ///   Some(empty_range_payload)`
+    ///
+    /// It blocks until at least one event is received.
+    pub async fn drain_events(&mut self) -> Result<(), ReplicationClosed> {
+        log::debug!("drain_events");
+
+        let entries = self.event_watcher.replicate_rx.changed();
+        let committed = self.event_watcher.committed_rx.changed();
+
+        futures_util::select! {
+            entries_res = entries.fuse() => {
+                entries_res.map_err(|_| ReplicationClosed::new("replicate_rx closed"))?;
+                // This read delivers the command: `borrow_and_update()` marks it as seen so a
+                // value arriving after `changed()` resolved is not delivered a second time.
+                let data = self.event_watcher.replicate_rx.borrow_and_update().clone();
+                self.inflight_id = Some(data.inflight_id);
+                self.next_action = Some(data.payload);
+            }
+            committed_res = committed.fuse() => {
+                committed_res.map_err(|_| ReplicationClosed::new("committed_rx closed"))?;
+
+                // Committed update: create an empty-range payload to sync commit index.
+                // This read delivers the event, thus it marks the value as seen.
+                let committed = self.event_watcher.committed_rx.borrow_and_update().clone();
+                self.replication_progress.local_committed = committed;
+
+                let m = self.replication_progress.remote_matched.clone();
+                let log_id_range = LogIdRange::new(m.clone(), m);
+                self.inflight_id = None;
+                self.next_action = Some(Payload::LogIdRange { log_id_range });
+            }
+        };
+
+        log::debug!(
+            "drain_events set: inflight_id={:?}, next_action={:?}",
+            self.inflight_id,
+            self.next_action
+        );
+
+        Ok(())
+    }
+}
