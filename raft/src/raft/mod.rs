@@ -35,6 +35,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+pub use crate::core::io_flush_tracking::FlushPoint;
 use core_state::CoreState;
 use derive_more::Display;
 use futures_util::FutureExt;

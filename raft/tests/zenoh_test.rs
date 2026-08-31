@@ -2,21 +2,16 @@
 
 //! Zenoh QUIC Plain 与 QUIC TLS 会话通信基础测试
 
+mod fixtures;
+
 use std::error::Error;
-use std::sync::atomic::AtomicU16;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use compio::time::sleep;
+use fixtures::get_available_port;
 use zenoh::Wait;
 use zenoh_raft::ZenohSessionBuilder;
 use zenoh_raft::ZenohTlsConfig;
-
-fn get_available_port() -> u16 {
-    static PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
-    let offset = PORT_COUNTER.fetch_add(1, Ordering::Relaxed);
-    fastrand::u16(32000..58000).wrapping_add(offset)
-}
 
 async fn run_zenoh_session_ping_test(
     session1: &zenoh::Session,

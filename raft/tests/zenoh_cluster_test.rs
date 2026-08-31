@@ -2,12 +2,13 @@
 
 //! 基于真实 Zenoh QUIC Plain 与 QUIC TLS 传输层的分布式 Raft 集群集成测试
 
+mod fixtures;
+
 use std::sync::Arc;
-use std::sync::atomic::AtomicU16;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Result;
+use fixtures::get_available_port;
 use maplit::btreeset;
 use zenoh::query::QueryTarget;
 use zenoh_raft::Config;
@@ -23,12 +24,6 @@ use zenoh_raft::testing::memstore::ClientRequest;
 use zenoh_raft::testing::memstore::IntoMemClientRequest;
 use zenoh_raft::testing::memstore::TypeConfig;
 use zenoh_raft::testing::memstore::new_mem_store;
-
-fn get_available_port() -> u16 {
-    static PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
-    let offset = PORT_COUNTER.fetch_add(1, Ordering::Relaxed);
-    fastrand::u16(32000..58000).wrapping_add(offset)
-}
 
 async fn run_3node_cluster_test(
     session: Arc<zenoh::Session>,

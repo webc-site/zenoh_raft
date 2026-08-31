@@ -9,6 +9,7 @@ use std::future::Future;
 use std::io::Cursor;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicU16;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -96,6 +97,12 @@ pub fn log_id(term: u64, node_id: u64, index: u64) -> LogIdOf<TypeConfig> {
 
 pub fn timeout() -> Option<Duration> {
     Some(Duration::from_millis(5_000))
+}
+
+pub fn get_available_port() -> u16 {
+    static PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
+    let offset = PORT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    fastrand::u16(32000..58000).wrapping_add(offset)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

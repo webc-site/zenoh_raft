@@ -791,3 +791,178 @@ async fn test_remove_hung_follower_must_not_block_raft_core_loop_2() -> Result<(
 
     Ok(())
 }
+
+/// 节点从集群中移除后停止对其日志复制
+#[compio::test]
+async fn test_add_remove_voter() -> Result<()> {
+    let c01234 = btreeset![0, 1, 2, 3, 4];
+    let c0123 = btreeset![0, 1, 2, 3];
+
+    let config = Arc::new(
+        Config {
+            enable_heartbeat: false,
+            ..Default::default()
+        }
+        .validate()?,
+    );
+    let mut router = RaftRouter::new(config.clone());
+    let mut log_index = router.new_cluster(c01234.clone(), btreeset! {}).await?;
+
+    router.client_request_many(0, "client", 100).await?;
+    log_index += 100;
+
+    for id in c01234.iter() {
+        router
+            .wait(id, timeout())
+            .applied_index(Some(log_index), "write 100 logs")
+            .await?;
+    }
+
+    let node = router.get_raft_handle(&0)?;
+    node.change_membership(c0123.clone(), false).await?;
+    log_index += 2;
+
+    for id in c0123.iter() {
+        router
+            .wait(id, timeout())
+            .applied_index(Some(log_index), "removed node-4 from membership")
+            .await?;
+    }
+
+    router.client_request_many(0, "client", 100).await?;
+    log_index += 100;
+
+    for id in c0123.iter() {
+        router
+            .wait(id, timeout())
+            .applied_index(Some(log_index), "4 nodes recv logs 100~200")
+            .await?;
+    }
+
+    let x = router.latest_metrics();
+    assert!(x[4].last_log_index < Some(log_index - 50));
+
+    router
+        .wait(&4, timeout())
+        .metrics(
+            |x| x.state == ServerState::Learner || x.state == ServerState::Candidate,
+            "node-4 is left a learner or candidate",
+        )
+        .await?;
+
+    Ok(())
+}
+
+/// 移除不可达 Follower 后停止对其复制
+#[compio::test]
+async fn test_stop_replication_to_removed_unreachable_follower() -> Result<()> {
+    let config = Arc::new(
+        Config {
+            enable_heartbeat: false,
+            ..Default::default()
+        }
+        .validate()?,
+    );
+
+    let mut router = RaftRouter::new(config.clone());
+    router.new_raft_node(0).await;
+
+    let mut log_index = router
+        .new_cluster(btreeset! {0, 1, 2, 3, 4}, btreeset! {})
+        .await?;
+
+    router.set_network_error(4, true);
+    let node4_log_index = log_index;
+
+    let node = router.get_raft_handle(&0)?;
+    node.change_membership([0, 1, 2], false).await?;
+    log_index += 2;
+
+    for i in &[0, 1, 2] {
+        router
+            .wait(i, timeout())
+            .metrics(
+                |x| x.last_log_index >= Some(log_index),
+                "0,1,2 recv 2 change-membership logs",
+            )
+            .await?;
+    }
+
+    router
+        .wait(&0, timeout())
+        .metrics(
+            |x| x.replication.as_ref().map(|y| y.contains_key(&4)) == Some(false),
+            "stopped replication to node 4",
+        )
+        .await?;
+
+    router.set_network_error(4, false);
+
+    router
+        .wait(&4, timeout())
+        .metrics(
+            |x| {
+                x.last_log_index == Some(node4_log_index)
+                    && (x.state == ServerState::Candidate || x.state == ServerState::Follower)
+            },
+            "node 4 stopped recv log and start to elect",
+        )
+        .await?;
+
+    Ok(())
+}
+
+/// 未初始化节点上的成员变更请求直接被拒绝
+#[compio::test]
+async fn test_change_membership_on_uninitialized_node() -> Result<()> {
+    let config = Arc::new(
+        Config {
+            enable_heartbeat: false,
+            ..Default::default()
+        }
+        .validate()?,
+    );
+
+    let mut router = RaftRouter::new(config.clone());
+    router.new_raft_node(0).await;
+
+    let n0 = router.get_raft_handle(&0)?;
+    let err = n0.add_learner(0, (), false).await.unwrap_err();
+    assert_eq!(
+        RaftError::APIError(ClientWriteError::ForwardToLeader(ForwardToLeader::empty())),
+        err
+    );
+
+    Ok(())
+}
+
+/// 将已同步大量日志的 Learner 提升为 Voter 时不会破坏单调递增保证 (Issue 584)
+#[compio::test]
+async fn test_replication_state_not_reverted_when_adding_learner_as_voter() -> Result<()> {
+    let config = Arc::new(
+        Config {
+            max_in_snapshot_log_to_keep: 2000,
+            enable_tick: false,
+            ..Default::default()
+        }
+        .validate()?,
+    );
+    let mut router = RaftRouter::new(config.clone());
+    let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {1}).await?;
+
+    let n = 50u64;
+    router
+        .client_request_many(0, "foo", (n - log_index) as usize)
+        .await?;
+    log_index = n;
+
+    router
+        .wait(&1, timeout())
+        .applied_index(Some(log_index), "replicate all logs to learner")
+        .await?;
+
+    let leader = router.get_raft_handle(&0)?;
+    leader.change_membership([0, 1], false).await?;
+
+    Ok(())
+}

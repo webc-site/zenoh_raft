@@ -11,6 +11,7 @@ use zenoh_raft::ServerState;
 use zenoh_raft::type_config::TypeConfigExt;
 
 use fixtures::RaftRouter;
+use fixtures::log_id;
 use fixtures::timeout;
 
 /// 当前 Leader 指标测试
@@ -665,6 +666,319 @@ async fn test_on_cluster_leader_change_future_is_awaited() -> Result<()> {
     assert_eq!(callback_counter.load(Ordering::SeqCst), 2);
 
     handle.close().await;
+
+    Ok(())
+}
+
+/// 应用进度监听 API (watch_apply_progress: get & wait_until_ge) 测试
+#[compio::test]
+async fn test_apply_progress_api() -> Result<()> {
+    use zenoh_raft::testing::memstore::TypeConfig;
+    use zenoh_raft::type_config::TypeConfigExt;
+
+    let config = Arc::new(
+        Config {
+            enable_tick: false,
+            ..Default::default()
+        }
+        .validate()?,
+    );
+    let mut router = RaftRouter::new(config.clone());
+    let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
+
+    let n0 = router.get_raft_handle(&0)?;
+    let progress = n0.watch_apply_progress();
+
+    let got = progress.get();
+    let want = Some(log_id(1, 0, log_index));
+    assert_eq!(got, want);
+
+    let target_index = log_index + 5;
+    let target = Some(log_id(1, 0, target_index));
+
+    let n0_clone = router.get_raft_handle(&0)?;
+    let handle = TypeConfig::spawn(async move {
+        let mut progress = n0_clone.watch_apply_progress();
+        progress.wait_until_ge(&target).await
+    });
+
+    log_index += router.client_request_many(0, "foo", 5).await?;
+
+    let got_wait = handle.await??;
+    let got_get = progress.get();
+
+    let want = Some(log_id(1, 0, log_index));
+    assert_eq!(got_wait, want);
+    assert_eq!(got_get, want);
+
+    Ok(())
+}
+
+/// 提交进度监听 API (watch_commit_progress: get & wait_until_ge) 测试
+#[compio::test]
+async fn test_commit_progress_api() -> Result<()> {
+    use zenoh_raft::testing::memstore::TypeConfig;
+    use zenoh_raft::type_config::TypeConfigExt;
+
+    let config = Arc::new(
+        Config {
+            enable_tick: false,
+            ..Default::default()
+        }
+        .validate()?,
+    );
+    let mut router = RaftRouter::new(config.clone());
+    let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
+
+    let n0 = router.get_raft_handle(&0)?;
+    let progress = n0.watch_commit_progress();
+
+    let got = progress.get();
+    let want = Some(log_id(1, 0, log_index));
+    assert_eq!(got, want);
+
+    let target_index = log_index + 5;
+    let target = Some(log_id(1, 0, target_index));
+
+    let n0_clone = router.get_raft_handle(&0)?;
+    let handle = TypeConfig::spawn(async move {
+        let mut progress = n0_clone.watch_commit_progress();
+        progress.wait_until_ge(&target).await
+    });
+
+    log_index += router.client_request_many(0, "foo", 5).await?;
+
+    let got_wait = handle.await??;
+    let got_get = progress.get();
+
+    let want = Some(log_id(1, 0, log_index));
+    assert_eq!(got_wait, want);
+    assert_eq!(got_get, want);
+
+    Ok(())
+}
+
+/// 日志进度监听 API (watch_log_progress: get & wait_until_ge) 测试
+#[compio::test]
+async fn test_log_progress_api() -> Result<()> {
+    use zenoh_raft::FlushPoint;
+    use zenoh_raft::Vote;
+    use zenoh_raft::testing::memstore::TypeConfig;
+    use zenoh_raft::type_config::TypeConfigExt;
+
+    let config = Arc::new(
+        Config {
+            enable_tick: false,
+            ..Default::default()
+        }
+        .validate()?,
+    );
+    let mut router = RaftRouter::new(config.clone());
+    let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
+
+    let n0 = router.get_raft_handle(&0)?;
+    let log_progress = n0.watch_log_progress();
+
+    let got = log_progress.get();
+    let want = Some(FlushPoint::new(
+        Vote::new_committed(1, 0),
+        Some(log_id(1, 0, log_index)),
+    ));
+    assert_eq!(got, want);
+
+    let target_index = log_index + 5;
+    let target = Some(FlushPoint::new(
+        Vote::new_committed(1, 0),
+        Some(log_id(1, 0, target_index)),
+    ));
+
+    let n0_clone = router.get_raft_handle(&0)?;
+    let handle = TypeConfig::spawn(async move {
+        let mut progress = n0_clone.watch_log_progress();
+        progress.wait_until_ge(&target).await
+    });
+
+    log_index += router.client_request_many(0, "foo", 5).await?;
+
+    let got_wait = handle.await??;
+    let got_get = log_progress.get();
+
+    let want = Some(FlushPoint::new(
+        Vote::new_committed(1, 0),
+        Some(log_id(1, 0, log_index)),
+    ));
+    assert_eq!(got_wait, want);
+    assert_eq!(got_get, want);
+
+    Ok(())
+}
+
+/// 伴随 Leader 切换的日志进度监听测试
+#[compio::test]
+async fn test_log_progress_with_leader_change() -> Result<()> {
+    use std::time::Duration;
+    use zenoh_raft::FlushPoint;
+    use zenoh_raft::Vote;
+    use zenoh_raft::testing::memstore::TypeConfig;
+    use zenoh_raft::type_config::TypeConfigExt;
+
+    let config = Arc::new(
+        Config {
+            enable_tick: false,
+            ..Default::default()
+        }
+        .validate()?,
+    );
+    let mut router = RaftRouter::new(config.clone());
+    let mut log_index = router
+        .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+        .await?;
+
+    let n1 = router.get_raft_handle(&1)?;
+    let log_progress = n1.watch_log_progress();
+
+    let got = log_progress.get();
+    let want = Some(FlushPoint::new(
+        Vote::new_committed(1, 0),
+        Some(log_id(1, 0, log_index)),
+    ));
+    assert_eq!(got, want);
+
+    let target_index = log_index + 4;
+    let target = Some(FlushPoint::new(
+        Vote::new_committed(2, 1),
+        Some(log_id(2, 1, target_index)),
+    ));
+
+    let n0 = router.get_raft_handle(&0)?;
+    n0.shutdown().await?;
+
+    TypeConfig::sleep(Duration::from_millis(500)).await;
+
+    let n1_clone = router.get_raft_handle(&1)?;
+    let handle = TypeConfig::spawn(async move {
+        let mut progress = n1_clone.watch_log_progress();
+        progress.wait_until_ge(&target).await
+    });
+
+    router.remove_node(0);
+
+    let n1 = router.get_raft_handle(&1)?;
+    n1.trigger().elect(false).await?;
+
+    router
+        .wait(&1, Some(Duration::from_millis(2000)))
+        .leader_with_quorum_acked(None, "wait for node 1 leader")
+        .await?;
+    log_index += 1;
+    log_index += router.client_request_many(1, "foo", 3).await?;
+
+    let got_wait = handle.await??;
+    let got_get = log_progress.get();
+
+    let want = Some(FlushPoint::new(
+        Vote::new_committed(2, 1),
+        Some(log_id(2, 1, log_index)),
+    ));
+    assert_eq!(got_wait, want);
+    assert_eq!(got_get, want);
+
+    Ok(())
+}
+
+/// 投票进度监听 API (watch_vote_progress: get & wait_until_ge) 测试
+#[compio::test]
+async fn test_vote_progress_api() -> Result<()> {
+    use std::time::Duration;
+    use zenoh_raft::Vote;
+    use zenoh_raft::testing::memstore::TypeConfig;
+    use zenoh_raft::type_config::TypeConfigExt;
+
+    let config = Arc::new(
+        Config {
+            enable_tick: false,
+            enable_heartbeat: false,
+            ..Default::default()
+        }
+        .validate()?,
+    );
+    let mut router = RaftRouter::new(config.clone());
+    let _log_index = router
+        .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+        .await?;
+
+    let n1 = router.get_raft_handle(&1)?;
+    let vote_progress = n1.watch_vote_progress();
+
+    let got = vote_progress.get();
+    let want = Some(Vote::new_committed(1, 0));
+    assert_eq!(got, want);
+
+    let n0 = router.get_raft_handle(&0)?;
+    n0.shutdown().await?;
+
+    TypeConfig::sleep(Duration::from_millis(500)).await;
+
+    let n1 = router.get_raft_handle(&1)?;
+    let handle = TypeConfig::spawn(async move {
+        let mut progress = n1.watch_vote_progress();
+        let target = Some(Vote::new(2, 1));
+        progress.wait_until_ge(&target).await
+    });
+
+    let n1 = router.get_raft_handle(&1)?;
+    n1.trigger().elect(false).await?;
+
+    let got_wait = handle.await??;
+    let got_get = vote_progress.get();
+
+    let want = Some(Vote::new(2, 1));
+    assert_eq!(got_wait, want);
+    assert!(got_get == want || got_get == Some(Vote::new_committed(2, 1)));
+
+    Ok(())
+}
+
+/// 快照进度监听 API (watch_snapshot_progress: get & wait_until_ge) 测试
+#[compio::test]
+async fn test_snapshot_progress_api() -> Result<()> {
+    use zenoh_raft::testing::memstore::TypeConfig;
+    use zenoh_raft::type_config::TypeConfigExt;
+
+    let config = Arc::new(
+        Config {
+            enable_tick: false,
+            ..Default::default()
+        }
+        .validate()?,
+    );
+    let mut router = RaftRouter::new(config.clone());
+    let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
+
+    let n0 = router.get_raft_handle(&0)?;
+    let progress = n0.watch_snapshot_progress();
+
+    let got = progress.get();
+    assert_eq!(got, None);
+
+    log_index += router.client_request_many(0, "foo", 5).await?;
+
+    let target = Some(log_id(1, 0, log_index));
+
+    let n0_clone = router.get_raft_handle(&0)?;
+    let handle = TypeConfig::spawn(async move {
+        let mut progress = n0_clone.watch_snapshot_progress();
+        progress.wait_until_ge(&target).await
+    });
+
+    n0.trigger().snapshot().await?;
+
+    let got_wait = handle.await??;
+    let got_get = progress.get();
+
+    let want = Some(log_id(1, 0, log_index));
+    assert_eq!(got_wait, want);
+    assert_eq!(got_get, want);
 
     Ok(())
 }

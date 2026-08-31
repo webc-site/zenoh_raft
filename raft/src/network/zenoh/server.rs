@@ -37,13 +37,20 @@ pub struct ZenohRaftServer {
 }
 
 #[inline]
-fn decode_req<T: for<'de> bitcode::Decode<'de>>(query: &Query) -> Result<T, String> {
-    match query.payload() {
+async fn decode_or_reply_err<T: for<'de> bitcode::Decode<'de>>(query: &Query) -> Option<T> {
+    let res = match query.payload() {
         Some(p) => {
             let bytes = p.to_bytes();
-            bitcode::decode(&bytes).map_err(|e| format!("decode error: {e}"))
+            bitcode::decode(&bytes)
         }
-        None => bitcode::decode(&[]).map_err(|e| format!("decode error: {e}")),
+        None => bitcode::decode(&[]),
+    };
+    match res {
+        Ok(val) => Some(val),
+        Err(e) => {
+            reply_err(query, format!("decode error: {e}")).await;
+            None
+        }
     }
 }
 
@@ -135,14 +142,12 @@ impl ZenohRaftServer {
         LogIdOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
         SnapshotMetaOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
     {
-        let wire_req =
-            match decode_req::<WireAppendEntriesReq<VoteOf<C>, LogIdOf<C>, EntryOf<C>>>(&query) {
-                Ok(req) => req,
-                Err(e) => {
-                    reply_err(&query, e).await;
-                    return;
-                }
-            };
+        let Some(wire_req) =
+            decode_or_reply_err::<WireAppendEntriesReq<VoteOf<C>, LogIdOf<C>, EntryOf<C>>>(&query)
+                .await
+        else {
+            return;
+        };
 
         let req = AppendEntriesRequest::from(wire_req);
 
@@ -170,12 +175,10 @@ impl ZenohRaftServer {
         LogIdOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
         SnapshotMetaOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
     {
-        let wire_req = match decode_req::<WireVoteReq<VoteOf<C>, LogIdOf<C>>>(&query) {
-            Ok(req) => req,
-            Err(e) => {
-                reply_err(&query, e).await;
-                return;
-            }
+        let Some(wire_req) =
+            decode_or_reply_err::<WireVoteReq<VoteOf<C>, LogIdOf<C>>>(&query).await
+        else {
+            return;
         };
 
         let req = wire_req.into_vote_request(is_pre_vote);
@@ -210,14 +213,11 @@ impl ZenohRaftServer {
         LogIdOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
         SnapshotMetaOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
     {
-        let wire_snap =
-            match decode_req::<WireSnapshotPayload<VoteOf<C>, SnapshotMetaOf<C>>>(&query) {
-                Ok(snap) => snap,
-                Err(e) => {
-                    reply_err(&query, e).await;
-                    return;
-                }
-            };
+        let Some(wire_snap) =
+            decode_or_reply_err::<WireSnapshotPayload<VoteOf<C>, SnapshotMetaOf<C>>>(&query).await
+        else {
+            return;
+        };
 
         let (vote, snapshot) = wire_snap.into_snapshot();
 
@@ -245,14 +245,12 @@ impl ZenohRaftServer {
         LogIdOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
         SnapshotMetaOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
     {
-        let wire_req =
-            match decode_req::<WireTransferLeaderReq<VoteOf<C>, C::NodeId, LogIdOf<C>>>(&query) {
-                Ok(req) => req,
-                Err(e) => {
-                    reply_err(&query, e).await;
-                    return;
-                }
-            };
+        let Some(wire_req) =
+            decode_or_reply_err::<WireTransferLeaderReq<VoteOf<C>, C::NodeId, LogIdOf<C>>>(&query)
+                .await
+        else {
+            return;
+        };
 
         let req = TransferLeaderRequest::from(wire_req);
 

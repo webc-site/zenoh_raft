@@ -73,23 +73,6 @@ impl<N: Clone> RawRpcError<N> {
             }),
         }
     }
-
-    fn into_streaming_error<C: RaftTypeConfig<NodeId = N>>(self) -> StreamingError<C> {
-        match self {
-            Self::Network(msg) => StreamingError::Network(NetworkError::from_string(msg)),
-            Self::Unreachable(msg) => StreamingError::Unreachable(Unreachable::from_string(msg)),
-            Self::Timeout {
-                action,
-                target,
-                timeout,
-            } => StreamingError::Timeout(Timeout {
-                action,
-                id: target.clone(),
-                target,
-                timeout,
-            }),
-        }
-    }
 }
 
 /// 预计算的 Zenoh RPC 路由键，避免在热路径上进行字符串格式化与堆内存分配
@@ -255,9 +238,9 @@ where
         Req: bitcode::Encode,
         Resp: for<'a> bitcode::Decode<'a>,
     {
-        self.send_raw_query(key, action, option, req)
+        self.send_query(key, action, option, req)
             .await
-            .map_err(|e| e.into_streaming_error())
+            .map_err(Into::into)
     }
 }
 
