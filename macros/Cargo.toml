@@ -1,0 +1,18 @@
+[package]
+name = "zenoh_raft_macros"
+version = "0.1.5"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/webc-site/zenoh_raft"
+homepage = "https://github.com/webc-site/zenoh_raft/tree/main/macros"
+description = "Procedural macros for zenoh_raft / zenoh_raft 过程宏"
+keywords = ["raft", "macros", "consensus", "zenoh", "distributed"]
+categories = ["asynchronous", "concurrency", "data-structures", "database-implementations", "development-tools::procedural-macro-helpers"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0.107"
+quote = "1.0.47"
+syn = { version = "3.0.4", features = ["full", "extra-traits"] }
