@@ -20,6 +20,7 @@ use zenoh_raft::Vote;
 use zenoh_raft::alias::SnapshotMetaOf;
 use zenoh_raft::alias::StoredMembershipOf;
 use zenoh_raft::raft::AppendEntriesRequest;
+use zenoh_raft::raft::AppendEntriesResponse;
 use zenoh_raft::storage::RaftLogStorage;
 use zenoh_raft::storage::RaftLogStorageExt;
 use zenoh_raft::storage::RaftStateMachine;
@@ -580,6 +581,108 @@ async fn test_snapshot_delete_conflicting_logs() -> Result<()> {
             log_st.last_log_id
         );
     }
+
+    Ok(())
+}
+
+/// 构建快照不会阻塞日志应用到状态机
+#[compio::test]
+async fn test_building_snapshot_does_not_block_apply() -> Result<()> {
+    let config = Arc::new(
+        Config {
+            enable_tick: false,
+            ..Default::default()
+        }
+        .validate()?,
+    );
+
+    let mut router = RaftRouter::new(config.clone());
+    let mut log_index = router.new_cluster(btreeset! {0, 1}, btreeset! {}).await?;
+
+    let follower = router.get_raft_handle(&1)?;
+
+    {
+        let (mut _sto1, sm1) = router.get_storage_handle(&1)?;
+        sm1.block.set_blocking(
+            BlockOperation::DelayBuildingSnapshot,
+            Duration::from_millis(5_000),
+        );
+    }
+
+    {
+        log_index += router.client_request_many(0, "0", 10).await?;
+        router
+            .wait(&1, timeout())
+            .applied_index(Some(log_index), "written 10 logs")
+            .await?;
+
+        follower.trigger().snapshot().await?;
+        TypeConfig::sleep(Duration::from_millis(500)).await;
+
+        let res = router
+            .wait(&1, Some(Duration::from_millis(500)))
+            .snapshot(log_id(1, 0, log_index), "building snapshot is blocked")
+            .await;
+        assert!(res.is_err(), "snapshot should be blocked and cannot finish");
+    }
+
+    {
+        let next = log_index + 1;
+
+        let rpc = AppendEntriesRequest::<TypeConfig> {
+            vote: Vote::new_committed(1, 0),
+            prev_log_id: Some(log_id(1, 0, log_index)),
+            entries: vec![blank_ent::<TypeConfig>(1, 0, next)],
+            leader_commit: Some(log_id(1, 0, next)),
+        };
+
+        let node = router.get_raft_handle(&1)?;
+        let resp = node.append_entries(rpc).await?;
+        assert_eq!(resp, AppendEntriesResponse::Success);
+
+        router
+            .wait(&1, timeout())
+            .applied_index(
+                Some(next),
+                format!(
+                    "log at index {} can be applied, while snapshot is building",
+                    next
+                ),
+            )
+            .await?;
+    }
+
+    Ok(())
+}
+
+/// SnapshotPolicy::Never 策略下不自动触发快照
+#[compio::test]
+async fn test_snapshot_policy_never() -> Result<()> {
+    let config = Arc::new(
+        Config {
+            snapshot_policy: SnapshotPolicy::Never,
+            enable_heartbeat: false,
+            enable_elect: false,
+            ..Default::default()
+        }
+        .validate()?,
+    );
+
+    let mut router = RaftRouter::new(config.clone());
+    let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
+
+    log_index += router.client_request_many(0, "0", 20).await?;
+    router
+        .wait(&0, timeout())
+        .applied_index(Some(log_index), "write 20 logs")
+        .await?;
+
+    let n0 = router.get_raft_handle(&0)?;
+    let snap = n0.get_snapshot().await?;
+    assert!(
+        snap.is_none(),
+        "never policy does not create snapshot automatically"
+    );
 
     Ok(())
 }

@@ -2,11 +2,14 @@
 
 mod fixtures;
 
+use std::pin::pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::Result;
+use futures_util::StreamExt;
+use futures_util::stream;
 use maplit::btreeset;
 use zenoh_raft::Config;
 use zenoh_raft::Entry;
@@ -16,6 +19,7 @@ use zenoh_raft::ServerState;
 use zenoh_raft::Vote;
 use zenoh_raft::alias::EntryOf;
 use zenoh_raft::raft::AppendEntriesRequest;
+use zenoh_raft::raft::StreamAppendError;
 use zenoh_raft::raft::VoteRequest;
 use zenoh_raft::storage::RaftLogStorage;
 use zenoh_raft::storage::RaftLogStorageExt;
@@ -570,6 +574,212 @@ async fn test_enable_heartbeat() -> Result<()> {
     n0.wait(timeout())
         .state(ServerState::Leader, "node-0 remains leader with heartbeats")
         .await?;
+
+    Ok(())
+}
+
+/// 大心跳间隔下复制不应被心跳阻塞，客户端写入正常驱动复制
+#[compio::test]
+async fn test_large_heartbeat() -> Result<()> {
+    let config = Arc::new(
+        Config {
+            heartbeat_interval: 10_000,
+            election_timeout_min: 20_000,
+            election_timeout_max: 30_000,
+            max_payload_entries: 2,
+            ..Default::default()
+        }
+        .validate()?,
+    );
+    let mut router = RaftRouter::new(config.clone());
+    let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {1}).await?;
+
+    router.client_request_many(0, "foo", 10).await?;
+    log_index += 10;
+
+    router
+        .wait(&1, Some(Duration::from_millis(3_000)))
+        .applied_index(
+            Some(log_index),
+            "learner caught up despite large heartbeat interval",
+        )
+        .await?;
+
+    Ok(())
+}
+
+/// 流式追加 entries 成功时按序返回各个 batch 的提交日志 ID
+#[compio::test]
+async fn test_stream_append_success() -> Result<()> {
+    let config = Arc::new(
+        Config {
+            enable_heartbeat: false,
+            ..Default::default()
+        }
+        .validate()?,
+    );
+
+    let mut router = RaftRouter::new(config.clone());
+    router.new_raft_node(0).await;
+    let raft = router.get_raft_handle(&0)?;
+
+    let requests = vec![
+        AppendEntriesRequest::<TypeConfig> {
+            vote: Vote::new_committed(1, 1),
+            prev_log_id: None,
+            entries: vec![
+                blank_ent::<TypeConfig>(0, 0, 0),
+                blank_ent::<TypeConfig>(1, 1, 1),
+            ],
+            leader_commit: None,
+        },
+        AppendEntriesRequest::<TypeConfig> {
+            vote: Vote::new_committed(1, 1),
+            prev_log_id: Some(log_id(1, 1, 1)),
+            entries: vec![
+                blank_ent::<TypeConfig>(1, 1, 2),
+                blank_ent::<TypeConfig>(1, 1, 3),
+            ],
+            leader_commit: None,
+        },
+        AppendEntriesRequest::<TypeConfig> {
+            vote: Vote::new_committed(1, 1),
+            prev_log_id: Some(log_id(1, 1, 3)),
+            entries: vec![blank_ent::<TypeConfig>(1, 1, 4)],
+            leader_commit: Some(log_id(1, 1, 4)),
+        },
+    ];
+
+    let input_stream = stream::iter(requests);
+    let mut output_stream = pin!(raft.stream_append(input_stream));
+
+    let mut results = Vec::new();
+    while let Some(res) = output_stream.next().await {
+        results.push(res);
+    }
+
+    assert_eq!(
+        results,
+        vec![
+            Ok(Ok(Some(log_id(1, 1, 1)))),
+            Ok(Ok(Some(log_id(1, 1, 3)))),
+            Ok(Ok(Some(log_id(1, 1, 4)))),
+        ]
+    );
+
+    Ok(())
+}
+
+/// 流式追加在遇到冲突时立即终止
+#[compio::test]
+async fn test_stream_append_conflict() -> Result<()> {
+    let config = Arc::new(
+        Config {
+            enable_heartbeat: false,
+            ..Default::default()
+        }
+        .validate()?,
+    );
+
+    let mut router = RaftRouter::new(config.clone());
+    router.new_raft_node(0).await;
+    let raft = router.get_raft_handle(&0)?;
+
+    let requests = vec![
+        AppendEntriesRequest::<TypeConfig> {
+            vote: Vote::new_committed(1, 1),
+            prev_log_id: None,
+            entries: vec![
+                blank_ent::<TypeConfig>(0, 0, 0),
+                blank_ent::<TypeConfig>(1, 1, 1),
+            ],
+            leader_commit: None,
+        },
+        AppendEntriesRequest::<TypeConfig> {
+            vote: Vote::new_committed(1, 1),
+            prev_log_id: Some(log_id(1, 1, 5)),
+            entries: vec![blank_ent::<TypeConfig>(1, 1, 6)],
+            leader_commit: None,
+        },
+        AppendEntriesRequest::<TypeConfig> {
+            vote: Vote::new_committed(1, 1),
+            prev_log_id: Some(log_id(1, 1, 6)),
+            entries: vec![blank_ent::<TypeConfig>(1, 1, 7)],
+            leader_commit: None,
+        },
+    ];
+
+    let input_stream = stream::iter(requests);
+    let mut output_stream = pin!(raft.stream_append(input_stream));
+
+    let mut results = Vec::new();
+    while let Some(res) = output_stream.next().await {
+        results.push(res);
+    }
+
+    assert_eq!(
+        results,
+        vec![
+            Ok(Ok(Some(log_id(1, 1, 1)))),
+            Ok(Err(StreamAppendError::Conflict(log_id(1, 1, 5)))),
+        ]
+    );
+
+    Ok(())
+}
+
+/// 流式追加在遇到更高 Vote 时立即终止
+#[compio::test]
+async fn test_stream_append_higher_vote() -> Result<()> {
+    let config = Arc::new(
+        Config {
+            enable_heartbeat: false,
+            ..Default::default()
+        }
+        .validate()?,
+    );
+
+    let mut router = RaftRouter::new(config.clone());
+    router.new_raft_node(0).await;
+    let raft = router.get_raft_handle(&0)?;
+
+    let resp = raft
+        .vote(VoteRequest {
+            vote: Vote::new(10, 2),
+            last_log_id: Some(log_id(10, 2, 100)),
+            leadership_transfer: false,
+            is_pre_vote: false,
+        })
+        .await?;
+    assert!(resp.is_granted_to(&Vote::new(10, 2)));
+
+    let requests = vec![
+        AppendEntriesRequest::<TypeConfig> {
+            vote: Vote::new_committed(1, 1),
+            prev_log_id: None,
+            entries: vec![blank_ent::<TypeConfig>(0, 0, 0)],
+            leader_commit: None,
+        },
+        AppendEntriesRequest::<TypeConfig> {
+            vote: Vote::new_committed(1, 1),
+            prev_log_id: Some(log_id(0, 0, 0)),
+            entries: vec![blank_ent::<TypeConfig>(1, 1, 1)],
+            leader_commit: None,
+        },
+    ];
+
+    let input_stream = stream::iter(requests);
+    let mut output_stream = pin!(raft.stream_append(input_stream));
+
+    let mut results = Vec::new();
+    while let Some(res) = output_stream.next().await {
+        results.push(res);
+    }
+
+    assert_eq!(
+        results,
+        vec![Ok(Err(StreamAppendError::HigherVote(Vote::new(10, 2)))),]
+    );
 
     Ok(())
 }

@@ -684,3 +684,247 @@ async fn test_trigger_transfer_leader() -> Result<()> {
 
     Ok(())
 }
+
+/// 测试通过 install_full_snapshot API 覆盖/安装快照
+#[compio::test]
+async fn test_install_full_snapshot() -> Result<()> {
+    let config = Arc::new(
+        Config {
+            enable_heartbeat: false,
+            enable_elect: false,
+            ..Default::default()
+        }
+        .validate()?,
+    );
+
+    let mut router = RaftRouter::new(config.clone());
+    let mut log_index = router
+        .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+        .await?;
+
+    router.set_unreachable(2, true);
+
+    log_index += router.client_request_many(0, "foo", 3).await?;
+    router
+        .wait(&0, timeout())
+        .applied_index(Some(log_index), "write more log")
+        .await?;
+    router
+        .wait(&1, timeout())
+        .applied_index(Some(log_index), "write more log")
+        .await?;
+
+    let snap;
+    {
+        let n0 = router.get_raft_handle(&0)?;
+        n0.trigger().snapshot().await?;
+        router
+            .wait(&0, timeout())
+            .snapshot(log_id(1, 0, log_index), "node-0 snapshot")
+            .await?;
+        snap = n0.get_snapshot().await?.unwrap();
+    }
+
+    {
+        let n1 = router.get_raft_handle(&1)?;
+        let resp = n1
+            .install_full_snapshot(Vote::new(0, 0), snap.clone())
+            .await?;
+        assert_eq!(Vote::new_committed(1, 0), resp.vote);
+        n1.with_raft_state(|state| {
+            assert_eq!(None, state.snapshot_meta.last_log_id);
+        })
+        .await?;
+    }
+
+    {
+        let n2 = router.get_raft_handle(&2)?;
+        let resp = n2
+            .install_full_snapshot(Vote::new_committed(1, 0), snap.clone())
+            .await?;
+        assert_eq!(Vote::new_committed(1, 0), resp.vote);
+        n2.with_raft_state(move |state| {
+            assert_eq!(
+                Some(log_id(1, 0, log_index)),
+                state.snapshot_meta.last_log_id
+            );
+        })
+        .await?;
+    }
+
+    Ok(())
+}
+
+/// Leader 租约过期时拒绝新写入，但保留已挂起写入并在租约恢复后成功提交
+#[compio::test]
+async fn test_client_write_requires_valid_quorum_lease() -> Result<()> {
+    let config = Arc::new(
+        Config {
+            heartbeat_interval: 20,
+            election_timeout_min: 100,
+            election_timeout_max: 200,
+            enable_tick: false,
+            enable_heartbeat: false,
+            enable_elect: false,
+            ..Default::default()
+        }
+        .validate()?,
+    );
+
+    let mut router = RaftRouter::new(config.clone());
+    let mut log_index = router
+        .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+        .await?;
+    let n0 = router.get_raft_handle(&0)?;
+
+    router.set_unreachable(1, true);
+    router.set_unreachable(2, true);
+
+    let (responder, pending_rx) = ProgressResponder::complete_only();
+    n0.client_write_ff(ClientRequest::make_request("pending", 1), Some(responder))
+        .await?;
+    log_index += 1;
+    n0.wait(timeout())
+        .log_index(Some(log_index), "pending write appended")
+        .await?;
+
+    TypeConfig::sleep(Duration::from_millis(config.election_timeout_max)).await;
+
+    let rejected = TypeConfig::timeout(
+        Duration::from_millis(100),
+        n0.client_write(ClientRequest::make_request("rejected", 2)),
+    )
+    .await
+    .expect("an expired leader lease rejects a new write")
+    .unwrap_err();
+
+    assert_eq!(
+        RaftError::APIError(ClientWriteError::ForwardToLeader(ForwardToLeader::empty())),
+        rejected
+    );
+
+    let metrics = n0.metrics().borrow_watched().clone();
+    assert_eq!(ServerState::Leader, metrics.state);
+    assert_eq!(Some(0), metrics.current_leader);
+    assert_eq!(Some(log_index), metrics.last_log_index);
+
+    router.set_unreachable(1, false);
+    router.set_unreachable(2, false);
+
+    let refresh_started = TypeConfig::now();
+    n0.trigger().heartbeat().await?;
+    n0.wait(timeout())
+        .leader_with_quorum_acked(Some(refresh_started), "leader lease recovered")
+        .await?;
+
+    let recovered = n0
+        .client_write(ClientRequest::make_request("recovered", 3))
+        .await?;
+    log_index += 1;
+    assert_eq!(log_id(1, 0, log_index), recovered.log_id);
+
+    let pending = pending_rx.await??;
+    assert_eq!(log_id(1, 0, log_index - 1), pending.log_id);
+
+    Ok(())
+}
+
+/// Raft 节点角色与成员查询 API (is_leader, node_id, voter_ids, learner_ids, as_leader) 测试
+#[compio::test]
+async fn test_api_node_roles() -> Result<()> {
+    let config = Arc::new(
+        Config {
+            enable_tick: false,
+            ..Default::default()
+        }
+        .validate()?,
+    );
+    let mut router = RaftRouter::new(config.clone());
+    router.new_cluster(btreeset! {0, 1}, btreeset! {2}).await?;
+
+    let leader = router.get_raft_handle(&0)?;
+    let follower = router.get_raft_handle(&1)?;
+    let learner = router.get_raft_handle(&2)?;
+
+    assert!(leader.is_leader());
+    assert!(!follower.is_leader());
+    assert!(!learner.is_leader());
+
+    assert_eq!(leader.node_id(), &0);
+    assert_eq!(follower.node_id(), &1);
+    assert_eq!(learner.node_id(), &2);
+
+    let voters: Vec<u64> = leader.voter_ids().collect();
+    assert_eq!(voters.len(), 2);
+    assert!(voters.contains(&0));
+    assert!(voters.contains(&1));
+
+    let learners: Vec<u64> = leader.learner_ids().collect();
+    assert_eq!(learners, vec![2]);
+
+    let leader_info = leader.as_leader().expect("leader info");
+    assert_eq!(leader_info.leader_id().node_id, 0);
+
+    let forward = follower.as_leader().expect_err("follower forward");
+    assert_eq!(forward.leader_id, Some(0));
+
+    Ok(())
+}
+
+/// 延迟网络模拟下的集群初始化、配置变更与日志写入
+#[compio::test]
+async fn test_lagging_network_write() -> Result<()> {
+    let config = Arc::new(
+        Config {
+            heartbeat_interval: 100,
+            election_timeout_min: 300,
+            election_timeout_max: 600,
+            enable_tick: false,
+            ..Default::default()
+        }
+        .validate()?,
+    );
+    let mut router = RaftRouter::builder(config).send_delay(30).build();
+
+    let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {1, 2}).await?;
+
+    router.client_request_many(0, "client", 1).await?;
+    log_index += 1;
+    for id in [0, 1, 2] {
+        router
+            .wait(&id, timeout())
+            .applied_index(Some(log_index), "write one log")
+            .await?;
+    }
+
+    let node = router.get_raft_handle(&0)?;
+    node.change_membership([0, 1, 2], false).await?;
+    log_index += 2;
+    router
+        .wait(&0, None)
+        .state(ServerState::Leader, "changed")
+        .await?;
+    for node in [1, 2] {
+        router
+            .wait(&node, None)
+            .state(ServerState::Follower, "changed")
+            .await?;
+    }
+    for id in [0, 1, 2] {
+        router
+            .wait(&id, timeout())
+            .applied_index(Some(log_index), "3 candidates")
+            .await?;
+    }
+
+    router.client_request_many(0, "client", 1).await?;
+    log_index += 1;
+    for id in [0, 1, 2] {
+        router
+            .wait(&id, timeout())
+            .applied_index(Some(log_index), "write 2nd log")
+            .await?;
+    }
+
+    Ok(())
+}

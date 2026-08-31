@@ -93,6 +93,29 @@ impl<N: Clone> RawRpcError<N> {
     }
 }
 
+/// 预计算的 Zenoh RPC 路由键，避免在热路径上进行字符串格式化与堆内存分配
+#[derive(Clone, Debug)]
+pub struct ZenohRpcKeys {
+    pub append_entries: String,
+    pub vote: String,
+    pub pre_vote: String,
+    pub snapshot: String,
+    pub transfer_leader: String,
+}
+
+impl ZenohRpcKeys {
+    pub fn new(key_prefix: &str, target: &impl Display) -> Self {
+        let base_key = format!("{key_prefix}/{target}");
+        Self {
+            append_entries: format!("{base_key}/{RPC_APPEND_ENTRIES}"),
+            vote: format!("{base_key}/{RPC_VOTE}"),
+            pre_vote: format!("{base_key}/{RPC_PRE_VOTE}"),
+            snapshot: format!("{base_key}/{RPC_SNAPSHOT}"),
+            transfer_leader: format!("{base_key}/{RPC_TRANSFER_LEADER}"),
+        }
+    }
+}
+
 /// 基于 Zenoh 的 Raft 网络工厂
 #[derive(Clone)]
 pub struct ZenohNetworkFactory<C: RaftTypeConfig> {
@@ -133,10 +156,10 @@ where
     type Network = ZenohNetwork<C>;
 
     async fn new_client(&mut self, target: C::NodeId, _node: &C::Node) -> Self::Network {
-        let base_key = format!("{}/{}", self.config.key_prefix, target);
+        let keys = ZenohRpcKeys::new(&self.config.key_prefix, &target);
         ZenohNetwork {
             target,
-            base_key,
+            keys,
             session: self.session.clone(),
             config: self.config.clone(),
             _marker: PhantomData,
@@ -147,7 +170,7 @@ where
 /// 基于 Zenoh 的目标节点 Raft 网络客户端
 pub struct ZenohNetwork<C: RaftTypeConfig> {
     target: C::NodeId,
-    base_key: String,
+    keys: ZenohRpcKeys,
     session: Arc<zenoh::Session>,
     config: ZenohNetworkConfig,
     _marker: PhantomData<C>,
@@ -157,14 +180,9 @@ impl<C: RaftTypeConfig> ZenohNetwork<C>
 where
     C::NodeId: Display,
 {
-    #[inline]
-    fn rpc_key(&self, rpc_name: &str) -> String {
-        format!("{}/{}", self.base_key, rpc_name)
-    }
-
     async fn send_raw_query<Req, Resp>(
         &self,
-        rpc_name: &str,
+        key: &str,
         action: RPCTypes,
         option: &RPCOption,
         req: &Req,
@@ -173,13 +191,12 @@ where
         Req: bitcode::Encode,
         Resp: for<'a> bitcode::Decode<'a>,
     {
-        let key = self.rpc_key(rpc_name);
         let timeout = option.soft_ttl();
         let payload = bitcode::encode(req);
 
         let replies = self
             .session
-            .get(&key)
+            .get(key)
             .payload(payload)
             .target(self.config.query_target)
             .timeout(timeout)
@@ -214,7 +231,7 @@ where
 
     async fn send_query<Req, Resp>(
         &self,
-        rpc_name: &str,
+        key: &str,
         action: RPCTypes,
         option: &RPCOption,
         req: &Req,
@@ -223,14 +240,14 @@ where
         Req: bitcode::Encode,
         Resp: for<'a> bitcode::Decode<'a>,
     {
-        self.send_raw_query(rpc_name, action, option, req)
+        self.send_raw_query(key, action, option, req)
             .await
             .map_err(|e| e.into_rpc_error())
     }
 
     async fn send_streaming_query<Req, Resp>(
         &self,
-        rpc_name: &str,
+        key: &str,
         action: RPCTypes,
         option: &RPCOption,
         req: &Req,
@@ -239,7 +256,7 @@ where
         Req: bitcode::Encode,
         Resp: for<'a> bitcode::Decode<'a>,
     {
-        self.send_raw_query(rpc_name, action, option, req)
+        self.send_raw_query(key, action, option, req)
             .await
             .map_err(|e| e.into_streaming_error())
     }
@@ -269,7 +286,7 @@ where
 
         let wire_resp: WireAppendEntriesResp<VoteOf<C>, LogIdOf<C>> = self
             .send_query(
-                RPC_APPEND_ENTRIES,
+                &self.keys.append_entries,
                 RPCTypes::AppendEntries,
                 &option,
                 &wire_req,
@@ -300,7 +317,7 @@ where
         };
 
         let wire_resp: WireVoteResp<VoteOf<C>, LogIdOf<C>> = self
-            .send_query(RPC_VOTE, RPCTypes::Vote, &option, &wire_req)
+            .send_query(&self.keys.vote, RPCTypes::Vote, &option, &wire_req)
             .await?;
 
         Ok(VoteResponse {
@@ -324,7 +341,7 @@ where
         };
 
         let wire_resp: WireVoteResp<VoteOf<C>, LogIdOf<C>> = self
-            .send_query(RPC_PRE_VOTE, RPCTypes::Vote, &option, &wire_req)
+            .send_query(&self.keys.pre_vote, RPCTypes::Vote, &option, &wire_req)
             .await?;
 
         Ok(VoteResponse {
@@ -349,7 +366,7 @@ where
 
         let wire_resp: WireSnapshotResp<VoteOf<C>> = self
             .send_streaming_query(
-                RPC_SNAPSHOT,
+                &self.keys.snapshot,
                 RPCTypes::InstallSnapshot,
                 &option,
                 &wire_payload,
@@ -374,7 +391,7 @@ where
 
         let wire_res: Result<(), WireTransferLeaderErr<VoteOf<C>, LogIdOf<C>>> = self
             .send_query(
-                RPC_TRANSFER_LEADER,
+                &self.keys.transfer_leader,
                 RPCTypes::TransferLeader,
                 &option,
                 &wire_req,

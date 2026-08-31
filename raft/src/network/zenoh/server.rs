@@ -1,5 +1,4 @@
-//! 基于 Zenoh 的 Raft 服务端实现
-
+use std::borrow::Cow;
 use std::fmt::Display;
 use std::io::Cursor;
 
@@ -91,6 +90,22 @@ impl ZenohRaftServer {
         })
     }
 
+    #[inline]
+    fn get_payload_bytes(query: &Query) -> Cow<'_, [u8]> {
+        query.payload().map(|p| p.to_bytes()).unwrap_or_default()
+    }
+
+    #[inline]
+    async fn reply_ok<T: bitcode::Encode>(query: &Query, resp: &T) {
+        let resp_bytes = bitcode::encode(resp);
+        let _ = query.reply(query.key_expr().clone(), resp_bytes).await;
+    }
+
+    #[inline]
+    async fn reply_err(query: &Query, err: impl AsRef<str>) {
+        let _ = query.reply_err(err.as_ref()).await;
+    }
+
     async fn dispatch_query<C, SM>(raft: Raft<C, SM>, query: Query)
     where
         C: RaftTypeConfig,
@@ -111,7 +126,9 @@ impl ZenohRaftServer {
             Some(RPC_PRE_VOTE) => Self::handle_vote(raft, query, true).await,
             Some(RPC_SNAPSHOT) => Self::handle_snapshot(raft, query).await,
             Some(RPC_TRANSFER_LEADER) => Self::handle_transfer_leader(raft, query).await,
-            _ => {}
+            _ => {
+                Self::reply_err(&query, "unknown RPC route").await;
+            }
         }
     }
 
@@ -128,19 +145,27 @@ impl ZenohRaftServer {
         LogIdOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
         SnapshotMetaOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
     {
-        let payload_bytes = query.payload().map(|p| p.to_bytes());
-        let payload: &[u8] = payload_bytes.as_deref().unwrap_or(&[]);
-
-        if let Ok(wire_req) =
-            bitcode::decode::<WireAppendEntriesReq<VoteOf<C>, LogIdOf<C>, EntryOf<C>>>(payload)
+        let payload = Self::get_payload_bytes(&query);
+        let wire_req = match bitcode::decode::<
+            WireAppendEntriesReq<VoteOf<C>, LogIdOf<C>, EntryOf<C>>,
+        >(&payload)
         {
-            let req = AppendEntriesRequest {
-                vote: wire_req.vote,
-                prev_log_id: wire_req.prev_log_id,
-                entries: wire_req.entries,
-                leader_commit: wire_req.leader_commit,
-            };
-            if let Ok(resp) = raft.append_entries(req).await {
+            Ok(req) => req,
+            Err(e) => {
+                Self::reply_err(&query, format!("decode error: {e}")).await;
+                return;
+            }
+        };
+
+        let req = AppendEntriesRequest {
+            vote: wire_req.vote,
+            prev_log_id: wire_req.prev_log_id,
+            entries: wire_req.entries,
+            leader_commit: wire_req.leader_commit,
+        };
+
+        match raft.append_entries(req).await {
+            Ok(resp) => {
                 let wire_resp = match resp {
                     AppendEntriesResponse::Success => WireAppendEntriesResp::Success,
                     AppendEntriesResponse::PartialSuccess(log_id) => {
@@ -149,8 +174,10 @@ impl ZenohRaftServer {
                     AppendEntriesResponse::Conflict => WireAppendEntriesResp::Conflict,
                     AppendEntriesResponse::HigherVote(v) => WireAppendEntriesResp::HigherVote(v),
                 };
-                let resp_bytes = bitcode::encode(&wire_resp);
-                let _ = query.reply(query.key_expr().clone(), resp_bytes).await;
+                Self::reply_ok(&query, &wire_resp).await;
+            }
+            Err(e) => {
+                Self::reply_err(&query, format!("append_entries error: {e}")).await;
             }
         }
     }
@@ -168,29 +195,39 @@ impl ZenohRaftServer {
         LogIdOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
         SnapshotMetaOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
     {
-        let payload_bytes = query.payload().map(|p| p.to_bytes());
-        let payload: &[u8] = payload_bytes.as_deref().unwrap_or(&[]);
+        let payload = Self::get_payload_bytes(&query);
+        let wire_req = match bitcode::decode::<WireVoteReq<VoteOf<C>, LogIdOf<C>>>(&payload) {
+            Ok(req) => req,
+            Err(e) => {
+                Self::reply_err(&query, format!("decode error: {e}")).await;
+                return;
+            }
+        };
 
-        if let Ok(wire_req) = bitcode::decode::<WireVoteReq<VoteOf<C>, LogIdOf<C>>>(payload) {
-            let req = VoteRequest {
-                vote: wire_req.vote,
-                last_log_id: wire_req.last_log_id,
-                leadership_transfer: wire_req.leadership_transfer,
-                is_pre_vote,
-            };
-            let res = if is_pre_vote {
-                raft.pre_vote(req).await
-            } else {
-                raft.vote(req).await
-            };
-            if let Ok(resp) = res {
+        let req = VoteRequest {
+            vote: wire_req.vote,
+            last_log_id: wire_req.last_log_id,
+            leadership_transfer: wire_req.leadership_transfer,
+            is_pre_vote,
+        };
+
+        let res = if is_pre_vote {
+            raft.pre_vote(req).await
+        } else {
+            raft.vote(req).await
+        };
+
+        match res {
+            Ok(resp) => {
                 let wire_resp = WireVoteResp {
                     vote: resp.vote,
                     vote_granted: resp.vote_granted,
                     last_log_id: resp.last_log_id,
                 };
-                let resp_bytes = bitcode::encode(&wire_resp);
-                let _ = query.reply(query.key_expr().clone(), resp_bytes).await;
+                Self::reply_ok(&query, &wire_resp).await;
+            }
+            Err(e) => {
+                Self::reply_err(&query, format!("vote error: {e}")).await;
             }
         }
     }
@@ -208,20 +245,28 @@ impl ZenohRaftServer {
         LogIdOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
         SnapshotMetaOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
     {
-        let payload_bytes = query.payload().map(|p| p.to_bytes());
-        let payload: &[u8] = payload_bytes.as_deref().unwrap_or(&[]);
-
-        if let Ok(wire_snap) =
-            bitcode::decode::<WireSnapshotPayload<VoteOf<C>, SnapshotMetaOf<C>>>(payload)
-        {
-            let snapshot = Snapshot {
-                meta: wire_snap.meta,
-                snapshot: Cursor::new(wire_snap.data),
+        let payload = Self::get_payload_bytes(&query);
+        let wire_snap =
+            match bitcode::decode::<WireSnapshotPayload<VoteOf<C>, SnapshotMetaOf<C>>>(&payload) {
+                Ok(snap) => snap,
+                Err(e) => {
+                    Self::reply_err(&query, format!("decode error: {e}")).await;
+                    return;
+                }
             };
-            if let Ok(resp) = raft.install_full_snapshot(wire_snap.vote, snapshot).await {
+
+        let snapshot = Snapshot {
+            meta: wire_snap.meta,
+            snapshot: Cursor::new(wire_snap.data),
+        };
+
+        match raft.install_full_snapshot(wire_snap.vote, snapshot).await {
+            Ok(resp) => {
                 let wire_resp = WireSnapshotResp { vote: resp.vote };
-                let resp_bytes = bitcode::encode(&wire_resp);
-                let _ = query.reply(query.key_expr().clone(), resp_bytes).await;
+                Self::reply_ok(&query, &wire_resp).await;
+            }
+            Err(e) => {
+                Self::reply_err(&query, format!("snapshot error: {e}")).await;
             }
         }
     }
@@ -239,18 +284,26 @@ impl ZenohRaftServer {
         LogIdOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
         SnapshotMetaOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
     {
-        let payload_bytes = query.payload().map(|p| p.to_bytes());
-        let payload: &[u8] = payload_bytes.as_deref().unwrap_or(&[]);
-
-        if let Ok(wire_req) =
-            bitcode::decode::<WireTransferLeaderReq<VoteOf<C>, C::NodeId, LogIdOf<C>>>(payload)
+        let payload = Self::get_payload_bytes(&query);
+        let wire_req = match bitcode::decode::<
+            WireTransferLeaderReq<VoteOf<C>, C::NodeId, LogIdOf<C>>,
+        >(&payload)
         {
-            let req = TransferLeaderRequest::new(
-                wire_req.from_leader,
-                wire_req.to_node_id,
-                wire_req.last_log_id,
-            );
-            if let Ok(res) = raft.handle_transfer_leader(req).await {
+            Ok(req) => req,
+            Err(e) => {
+                Self::reply_err(&query, format!("decode error: {e}")).await;
+                return;
+            }
+        };
+
+        let req = TransferLeaderRequest::new(
+            wire_req.from_leader,
+            wire_req.to_node_id,
+            wire_req.last_log_id,
+        );
+
+        match raft.handle_transfer_leader(req).await {
+            Ok(res) => {
                 let wire_res = match res {
                     Ok(()) => Ok(()),
                     Err(TransferLeaderError::VoteChanged { expected, actual }) => {
@@ -260,8 +313,10 @@ impl ZenohRaftServer {
                         Err(WireTransferLeaderErr::LogNotFlushed { expected, actual })
                     }
                 };
-                let resp_bytes = bitcode::encode(&wire_res);
-                let _ = query.reply(query.key_expr().clone(), resp_bytes).await;
+                Self::reply_ok(&query, &wire_res).await;
+            }
+            Err(e) => {
+                Self::reply_err(&query, format!("transfer_leader error: {e}")).await;
             }
         }
     }

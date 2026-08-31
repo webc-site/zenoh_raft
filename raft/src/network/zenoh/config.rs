@@ -142,37 +142,19 @@ impl ZenohSessionBuilder {
     /// 构建 `zenoh::Config`
     pub fn build_config(&self) -> Result<zenoh::Config, AnyError> {
         let mut config = zenoh::Config::default();
-        config
-            .insert_json5(
-                "scouting/multicast/enabled",
-                if self.enable_multicast {
-                    "true"
-                } else {
-                    "false"
-                },
-            )
-            .map_err(|e| AnyError::error(e.to_string()))?;
-        config
-            .insert_json5(
-                "scouting/gossip/enabled",
-                if self.enable_gossip { "true" } else { "false" },
-            )
-            .map_err(|e| AnyError::error(e.to_string()))?;
+        insert_bool(
+            &mut config,
+            "scouting/multicast/enabled",
+            self.enable_multicast,
+        )?;
+        insert_bool(&mut config, "scouting/gossip/enabled", self.enable_gossip)?;
 
         if !self.listen_endpoints.is_empty() {
-            let json = sonic_rs::to_string(&self.listen_endpoints)
-                .map_err(|e| AnyError::error(e.to_string()))?;
-            config
-                .insert_json5("listen/endpoints", &json)
-                .map_err(|e| AnyError::error(e.to_string()))?;
+            insert_json(&mut config, "listen/endpoints", &self.listen_endpoints)?;
         }
 
         if !self.connect_endpoints.is_empty() {
-            let json = sonic_rs::to_string(&self.connect_endpoints)
-                .map_err(|e| AnyError::error(e.to_string()))?;
-            config
-                .insert_json5("connect/endpoints", &json)
-                .map_err(|e| AnyError::error(e.to_string()))?;
+            insert_json(&mut config, "connect/endpoints", &self.connect_endpoints)?;
         }
 
         // 如果存在监听端点但未设置 TLS，自动为 QUIC 提供自签名凭据
@@ -185,42 +167,38 @@ impl ZenohSessionBuilder {
         });
 
         if let Some(tls) = tls_option {
-            let cert_json = sonic_rs::to_string(&tls.cert_base64)
-                .map_err(|e| AnyError::error(e.to_string()))?;
-            let key_json =
-                sonic_rs::to_string(&tls.key_base64).map_err(|e| AnyError::error(e.to_string()))?;
-            config
-                .insert_json5("transport/link/tls/listen_certificate_base64", &cert_json)
-                .map_err(|e| AnyError::error(e.to_string()))?;
-            config
-                .insert_json5("transport/link/tls/listen_private_key_base64", &key_json)
-                .map_err(|e| AnyError::error(e.to_string()))?;
-            config
-                .insert_json5("transport/link/tls/connect_certificate_base64", &cert_json)
-                .map_err(|e| AnyError::error(e.to_string()))?;
-            config
-                .insert_json5("transport/link/tls/connect_private_key_base64", &key_json)
-                .map_err(|e| AnyError::error(e.to_string()))?;
+            insert_json(
+                &mut config,
+                "transport/link/tls/listen_certificate_base64",
+                &tls.cert_base64,
+            )?;
+            insert_json(
+                &mut config,
+                "transport/link/tls/listen_private_key_base64",
+                &tls.key_base64,
+            )?;
+            insert_json(
+                &mut config,
+                "transport/link/tls/connect_certificate_base64",
+                &tls.cert_base64,
+            )?;
+            insert_json(
+                &mut config,
+                "transport/link/tls/connect_private_key_base64",
+                &tls.key_base64,
+            )?;
 
             let root_ca = tls.root_ca_base64.as_ref().unwrap_or(&tls.cert_base64);
-            let root_ca_json =
-                sonic_rs::to_string(root_ca).map_err(|e| AnyError::error(e.to_string()))?;
-            config
-                .insert_json5(
-                    "transport/link/tls/root_ca_certificate_base64",
-                    &root_ca_json,
-                )
-                .map_err(|e| AnyError::error(e.to_string()))?;
-            config
-                .insert_json5(
-                    "transport/link/tls/verify_name_on_connect",
-                    if tls.verify_name_on_connect {
-                        "true"
-                    } else {
-                        "false"
-                    },
-                )
-                .map_err(|e| AnyError::error(e.to_string()))?;
+            insert_json(
+                &mut config,
+                "transport/link/tls/root_ca_certificate_base64",
+                root_ca,
+            )?;
+            insert_bool(
+                &mut config,
+                "transport/link/tls/verify_name_on_connect",
+                tls.verify_name_on_connect,
+            )?;
         }
 
         Ok(config)
@@ -233,4 +211,23 @@ impl ZenohSessionBuilder {
             .await
             .map_err(|e| AnyError::error(e.to_string()))
     }
+}
+
+#[inline]
+fn insert_json(
+    config: &mut zenoh::Config,
+    key: &str,
+    val: &impl sonic_rs::Serialize,
+) -> Result<(), AnyError> {
+    let json = sonic_rs::to_string(val).map_err(|e| AnyError::error(e.to_string()))?;
+    config
+        .insert_json5(key, &json)
+        .map_err(|e| AnyError::error(e.to_string()))
+}
+
+#[inline]
+fn insert_bool(config: &mut zenoh::Config, key: &str, val: bool) -> Result<(), AnyError> {
+    config
+        .insert_json5(key, if val { "true" } else { "false" })
+        .map_err(|e| AnyError::error(e.to_string()))
 }
