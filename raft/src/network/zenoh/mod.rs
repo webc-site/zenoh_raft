@@ -8,3 +8,4 @@ pub mod wire;
 pub use client::{ZenohNetwork, ZenohNetworkFactory};
 pub use config::{ZenohNetworkConfig, ZenohSessionBuilder, ZenohTlsConfig};
 pub use server::ZenohRaftServer;
+pub use wire::{RPC_APPEND_ENTRIES, RPC_PRE_VOTE, RPC_SNAPSHOT, RPC_TRANSFER_LEADER, RPC_VOTE};

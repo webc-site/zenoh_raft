@@ -624,3 +624,158 @@ async fn test_issue_920_non_member_leader_restart() -> Result<()> {
 
   Ok(())
 }
+
+use zenoh_raft::{
+  Membership,
+  errors::{Fatal, InitializeError, NotAllowed, NotInMembers},
+};
+
+/// 尝试使用不包含目标节点的成员配置初始化应返回 NotInMembers 错误
+#[compio::test]
+async fn test_initialize_err_target_not_include_target() -> Result<()> {
+  let config = Arc::new(Config::default().validate()?);
+  let mut router = RaftRouter::new(config);
+  router.new_raft_node(0).await;
+  router.new_raft_node(1).await;
+
+  for node_id in 0..2 {
+    let n = router.get_raft_handle(&node_id)?;
+    let res = n.initialize(btreeset! {9}).await;
+    assert!(res.is_err());
+    let err = res.unwrap_err();
+    assert_eq!(
+      InitializeError::NotInMembers(NotInMembers {
+        node_id,
+        membership: Membership::new_with_defaults(vec![btreeset! {9}], [])
+      }),
+      err.into_api_error().unwrap()
+    );
+  }
+
+  Ok(())
+}
+
+/// 重复初始化已初始化的节点应返回 NotAllowed 错误
+#[compio::test]
+async fn test_initialize_err_not_allowed() -> Result<()> {
+  let config = Arc::new(Config::default().validate()?);
+  let mut router = RaftRouter::new(config);
+  router.new_raft_node(0).await;
+
+  let n0 = router.get_raft_handle(&0)?;
+  n0.initialize(btreeset! {0}).await?;
+  n0.wait(timeout()).log_index(Some(1), "init").await?;
+
+  let res = n0.initialize(btreeset! {0}).await;
+  assert!(res.is_err());
+  let err = res.unwrap_err();
+  assert_eq!(
+    InitializeError::NotAllowed(NotAllowed {
+      last_log_id: Some(log_id(1, 0, 1)),
+      vote: Vote::new_committed(1, 0)
+    }),
+    err.into_api_error().unwrap()
+  );
+
+  Ok(())
+}
+
+/// 当 RaftCore 发生 panic 时，后续请求应返回 Fatal::Panicked
+#[compio::test]
+async fn test_return_error_after_panic() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  router.new_cluster(btreeset! {0}, btreeset! {}).await?;
+
+  router
+    .external_request(0, |_s| {
+      panic!("foo");
+    })
+    .await?;
+
+  let res = router.client_request(0, "foo", 2).await;
+  let err = res.unwrap_err();
+  assert_eq!(Fatal::Panicked, err.into_fatal().unwrap());
+
+  Ok(())
+}
+
+/// 状态机 Worker panic 退出后 get_snapshot 应安全返回 Fatal::Stopped 而不挂起
+#[compio::test]
+async fn test_get_snapshot_returns_stopped_when_sm_worker_dies() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  router.new_cluster(btreeset! {0}, btreeset! {}).await?;
+
+  {
+    let (_log_store, sm) = router.get_storage_handle(&0)?;
+    sm.panic_on_apply(true);
+  }
+
+  let res = router.client_request(0, "c", 1).await;
+  assert!(res.is_err());
+
+  let raft = router.get_raft_handle(&0)?;
+  let err = raft.get_snapshot().await.unwrap_err();
+  assert_eq!(Fatal::Stopped, err.into_fatal().unwrap());
+
+  Ok(())
+}
+
+/// with_state_machine 闭包发生 panic 时应返回 Fatal::Stopped
+#[compio::test]
+async fn test_with_state_machine_returns_stopped_when_func_panics() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  router.new_cluster(btreeset! {0}, btreeset! {}).await?;
+
+  let raft = router.get_raft_handle(&0)?;
+  let res = raft
+    .with_state_machine::<_, ()>(|_sm| Box::pin(async move { panic!("injected worker panic") }))
+    .await;
+  assert_eq!(Fatal::Stopped, res.unwrap_err());
+
+  Ok(())
+}
+
+/// 节点停机后访问应返回 Fatal::Stopped
+#[compio::test]
+async fn test_return_error_after_shutdown() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  router.new_cluster(btreeset! {0}, btreeset! {}).await?;
+
+  let n = router.get_raft_handle(&0)?;
+  n.shutdown().await?;
+
+  let res = router.client_request(0, "foo", 2).await;
+  let err = res.unwrap_err();
+  assert_eq!(Fatal::Stopped, err.into_fatal().unwrap());
+
+  Ok(())
+}
+

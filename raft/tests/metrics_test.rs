@@ -966,3 +966,274 @@ async fn test_snapshot_progress_api() -> Result<()> {
 
   Ok(())
 }
+
+use std::{
+  sync::atomic::{AtomicU64, Ordering},
+  time::Duration,
+};
+use zenoh_raft::{
+  SnapshotPolicy,
+  metrics::MetricsRecorder,
+  storage::RaftLogStorage,
+  testing::memstore::TypeConfig,
+};
+
+#[derive(Debug, Default)]
+struct TestRecorder {
+  pub apply_batch_total: AtomicU64,
+  pub append_batch_total: AtomicU64,
+  pub write_batch_total: AtomicU64,
+
+  pub current_term: AtomicU64,
+  pub last_log_index: AtomicU64,
+  pub committed_index: AtomicU64,
+  pub applied_index: AtomicU64,
+  pub snapshot_index: AtomicU64,
+  pub purged_index: AtomicU64,
+  pub server_state: AtomicU64,
+
+  pub vote_count: AtomicU64,
+  pub heartbeat_count: AtomicU64,
+  pub append_count: AtomicU64,
+}
+
+impl MetricsRecorder for TestRecorder {
+  fn record_apply_batch(&self, n: u64) {
+    self.apply_batch_total.fetch_add(n, Ordering::Relaxed);
+  }
+
+  fn record_append_batch(&self, n: u64) {
+    self.append_batch_total.fetch_add(n, Ordering::Relaxed);
+  }
+
+  fn record_write_batch(&self, n: u64) {
+    self.write_batch_total.fetch_add(n, Ordering::Relaxed);
+  }
+
+  fn set_current_term(&self, v: u64) {
+    self.current_term.store(v, Ordering::Relaxed);
+  }
+
+  fn set_last_log_index(&self, v: u64) {
+    self.last_log_index.store(v, Ordering::Relaxed);
+  }
+
+  fn set_committed_index(&self, v: u64) {
+    self.committed_index.store(v, Ordering::Relaxed);
+  }
+
+  fn set_applied_index(&self, v: u64) {
+    self.applied_index.store(v, Ordering::Relaxed);
+  }
+
+  fn set_snapshot_index(&self, v: u64) {
+    self.snapshot_index.store(v, Ordering::Relaxed);
+  }
+
+  fn set_purged_index(&self, v: u64) {
+    self.purged_index.store(v, Ordering::Relaxed);
+  }
+
+  fn set_server_state(&self, v: u8) {
+    self.server_state.store(v as u64, Ordering::Relaxed);
+  }
+
+  fn increment_vote(&self) {
+    self.vote_count.fetch_add(1, Ordering::Relaxed);
+  }
+
+  fn increment_heartbeat(&self) {
+    self.heartbeat_count.fetch_add(1, Ordering::Relaxed);
+  }
+
+  fn increment_append(&self) {
+    self.append_count.fetch_add(1, Ordering::Relaxed);
+  }
+}
+
+/// 测试 Leader 上的 MetricsRecorder 收集各项指标
+#[compio::test]
+async fn test_metrics_recorder_all_fields() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_elect: false,
+      snapshot_policy: SnapshotPolicy::LogsSinceLast(5),
+      max_in_snapshot_log_to_keep: 0,
+      purge_batch_size: 1,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  let mut log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
+
+  let recorder = Arc::new(TestRecorder::default());
+  let leader_id = router.leader().expect("leader found");
+  let leader = router.get_raft_handle(&leader_id)?;
+  leader.set_metrics_recorder(Some(recorder.clone())).await?;
+
+  log_index += router.client_request_many(leader_id, "test", 10).await?;
+
+  for node_id in [0, 1, 2] {
+    router
+      .wait(&node_id, timeout())
+      .applied_index(Some(log_index), "applied")
+      .await?;
+  }
+
+  leader.trigger().heartbeat().await?;
+  leader.trigger().snapshot().await?;
+  router
+    .wait(&leader_id, timeout())
+    .snapshot(log_id(1, leader_id, log_index), "snapshot")
+    .await?;
+
+  leader.trigger().purge_log(log_index).await?;
+  router
+    .wait(&leader_id, timeout())
+    .purged(Some(log_id(1, leader_id, log_index)), "purged")
+    .await?;
+
+  TypeConfig::sleep(Duration::from_millis(100)).await;
+
+  assert!(recorder.write_batch_total.load(Ordering::Relaxed) > 0);
+  assert!(recorder.append_batch_total.load(Ordering::Relaxed) > 0);
+  assert!(recorder.apply_batch_total.load(Ordering::Relaxed) > 0);
+
+  assert!(recorder.current_term.load(Ordering::Relaxed) >= 1);
+  assert!(recorder.last_log_index.load(Ordering::Relaxed) > 0);
+  assert!(recorder.committed_index.load(Ordering::Relaxed) > 0);
+  assert!(recorder.applied_index.load(Ordering::Relaxed) > 0);
+  assert!(recorder.snapshot_index.load(Ordering::Relaxed) > 0);
+  assert!(recorder.purged_index.load(Ordering::Relaxed) > 0);
+  assert_eq!(recorder.server_state.load(Ordering::Relaxed), 3);
+  assert!(recorder.heartbeat_count.load(Ordering::Relaxed) > 0);
+
+  Ok(())
+}
+
+/// 测试 Follower 上的 MetricsRecorder 收集接收 RPC 指标
+#[compio::test]
+async fn test_metrics_recorder_on_follower() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_elect: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  let mut log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
+
+  let recorder = Arc::new(TestRecorder::default());
+  let follower = router.get_raft_handle(&1)?;
+  follower.set_metrics_recorder(Some(recorder.clone())).await?;
+
+  let leader_id = router.leader().expect("leader found");
+  log_index += router.client_request_many(leader_id, "test", 5).await?;
+
+  router
+    .wait(&1, timeout())
+    .applied_index(Some(log_index), "follower applied")
+    .await?;
+
+  let node2 = router.get_raft_handle(&2)?;
+  node2.trigger().elect(false).await?;
+
+  TypeConfig::sleep(Duration::from_millis(200)).await;
+
+  assert!(recorder.append_count.load(Ordering::Relaxed) > 0);
+  assert!(recorder.append_batch_total.load(Ordering::Relaxed) > 0);
+  assert!(recorder.apply_batch_total.load(Ordering::Relaxed) > 0);
+  assert!(recorder.vote_count.load(Ordering::Relaxed) > 0);
+  assert!(recorder.current_term.load(Ordering::Relaxed) >= 1);
+  assert!(recorder.last_log_index.load(Ordering::Relaxed) > 0);
+  assert!(recorder.applied_index.load(Ordering::Relaxed) > 0);
+
+  let state = recorder.server_state.load(Ordering::Relaxed);
+  assert!(state == 1 || state == 2);
+
+  Ok(())
+}
+
+/// 测试 metrics 报告已清除的 purged 日志 ID
+#[compio::test]
+async fn test_purged_metrics() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      max_in_snapshot_log_to_keep: 0,
+      purge_batch_size: 1,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  let mut log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
+
+  log_index += router.client_request_many(0, "foo", 10).await?;
+
+  let n0 = router.get_raft_handle(&0)?;
+  n0.trigger().snapshot().await?;
+  n0.wait(timeout())
+    .snapshot(log_id(1, 0, log_index), "build snapshot")
+    .await?;
+
+  n0.wait(timeout())
+    .metrics(
+      |m| m.purged == Some(log_id(1, 0, log_index)),
+      "purged is reported to metrics",
+    )
+    .await?;
+
+  let (mut sto0, _sm0) = router.get_storage_handle(&0)?;
+  let state = sto0.get_log_state().await?;
+  assert_eq!(state.last_purged_log_id, Some(log_id(1, 0, log_index)));
+
+  Ok(())
+}
+
+/// 测试从 metrics 获取 leader_last_ack / last_quorum_acked
+#[compio::test]
+async fn test_leader_last_ack() -> Result<()> {
+  let heartbeat_interval = 50;
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      heartbeat_interval,
+      enable_elect: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  let _ = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
+
+  let n0 = router.get_raft_handle(&0)?;
+  let acked_before = n0.metrics().borrow_watched().last_quorum_acked;
+  assert!(acked_before.is_some());
+
+  TypeConfig::sleep(Duration::from_millis(50)).await;
+  let started = TypeConfig::now();
+  n0.trigger().heartbeat().await?;
+  n0.wait(timeout())
+    .leader_with_quorum_acked(Some(started), "last_quorum_acked refreshed")
+    .await?;
+
+  let acked_after = n0.metrics().borrow_watched().last_quorum_acked;
+  assert!(acked_after.unwrap().into_inner() >= started);
+
+  Ok(())
+}
+
+

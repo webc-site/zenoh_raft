@@ -72,6 +72,41 @@ pub fn timeout() -> Option<Duration> {
   Some(Duration::from_millis(5_000))
 }
 
+pub fn default_test_config() -> Arc<Config> {
+  Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_elect: false,
+      ..Default::default()
+    }
+    .validate()
+    .expect("valid default test config"),
+  )
+}
+
+pub fn elect_test_config(min: u64, max: u64) -> Arc<Config> {
+  Arc::new(
+    Config {
+      election_timeout_min: min,
+      election_timeout_max: max,
+      enable_elect: false,
+      ..Default::default()
+    }
+    .validate()
+    .expect("valid elect test config"),
+  )
+}
+
+pub fn expect_quorum_not_enough(
+  err: RaftError<TypeConfig, LinearizableReadError<TypeConfig>>,
+) -> BTreeSet<MemNodeId> {
+  let api_err = err.into_api_error().expect("expected api error");
+  match api_err {
+    LinearizableReadError::QuorumNotEnough(e) => e.got,
+    other => panic!("expected QuorumNotEnough, got {other:?}"),
+  }
+}
+
 pub fn get_available_port() -> u16 {
   static PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
   let offset = PORT_COUNTER.fetch_add(1, Ordering::Relaxed);
