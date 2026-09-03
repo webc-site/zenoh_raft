@@ -494,41 +494,174 @@ async fn test_manual_pre_vote_from_healthy_follower_with_stale_peer() -> Result<
   Ok(())
 }
 
-/// 单向网络隔离场景下的选举行为
+use fixtures::{Direction::NetRecv, rpc_error_type::RpcErrorType};
+
+/// 即使所有出站 RPC 失败，只要仍能接收心跳，Follower 就不能主动发起选举
 #[compio::test]
-async fn test_one_way_isolation() -> Result<()> {
+async fn test_inbound_heartbeats_prevent_election_when_outbound_rpcs_fail() -> Result<()> {
+  let config = Config {
+    enable_pre_vote: Some(false),
+    election_timeout_min: 150,
+    election_timeout_max: 151,
+    ..Default::default()
+  }
+  .validate()?;
+  let mut router = RaftRouter::new(Arc::new(config));
+
+  let _log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
+
+  let n0 = router.get_raft_handle(&0)?;
+  let n1 = router.get_raft_handle(&1)?;
+
+  let before = n1
+    .wait(Some(Duration::from_millis(2_000)))
+    .metrics(
+      |metrics| metrics.state == ServerState::Follower && metrics.current_leader == Some(0),
+      "node 1 follows node 0",
+    )
+    .await?;
+
+  router.set_rpc_failure(1, NetSend, Some(RpcErrorType::NetworkError));
+
+  let heartbeat_at = TypeConfig::now();
+  n0.trigger().heartbeat().await?;
+
+  let mut heartbeat_received = false;
+  for _ in 0..20 {
+    let last_modified = router
+      .with_raft_state(1, |state| state.vote_last_modified())
+      .await?;
+    if last_modified > Some(heartbeat_at) {
+      heartbeat_received = true;
+      break;
+    }
+    TypeConfig::sleep(Duration::from_millis(50)).await;
+  }
+  assert!(
+    heartbeat_received,
+    "node 1 must receive the forced heartbeat"
+  );
+
+  TypeConfig::sleep(Duration::from_millis(300)).await;
+
+  let after = n1.metrics().borrow_watched().clone();
+  assert_eq!(before.current_term, after.current_term);
+  assert_eq!(before.vote, after.vote);
+  assert_eq!(Some(0), after.current_leader);
+  assert_eq!(ServerState::Follower, after.state);
+
+  Ok(())
+}
+
+/// 当 Follower 无法接收心跳但可以出站 RPC 时，必须发起选举
+#[compio::test]
+async fn test_missing_inbound_heartbeats_start_election() -> Result<()> {
+  let config = Config {
+    enable_pre_vote: Some(false),
+    election_timeout_min: 150,
+    election_timeout_max: 151,
+    ..Default::default()
+  }
+  .validate()?;
+  let mut router = RaftRouter::new(Arc::new(config));
+
+  let _log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
+
+  let n1 = router.get_raft_handle(&1)?;
+  let before = n1
+    .wait(Some(Duration::from_millis(2_000)))
+    .metrics(
+      |metrics| metrics.state == ServerState::Follower && metrics.current_leader == Some(0),
+      "node 1 follows node 0",
+    )
+    .await?;
+
+  router.set_rpc_failure(1, NetRecv, Some(RpcErrorType::NetworkError));
+
+  let campaigned = router
+    .wait(&1, Some(Duration::from_millis(2_000)))
+    .metrics(
+      |metrics| metrics.current_term > before.current_term,
+      "node 1 advances its term after leader lease expires",
+    )
+    .await?;
+
+  assert_eq!(Vote::new(campaigned.current_term, 1), campaigned.vote);
+  assert_eq!(ServerState::Candidate, campaigned.state);
+
+  Ok(())
+}
+
+/// 禁用 Pre-Vote 时，被隔离的 Follower 会随着超时不断抬高 Term
+#[compio::test]
+async fn test_without_pre_vote_term_inflates() -> Result<()> {
   let config = Arc::new(
     Config {
-      enable_heartbeat: false,
-      enable_elect: false,
+      enable_pre_vote: Some(false),
       ..Default::default()
     }
     .validate()?,
   );
 
-  let mut router = RaftRouter::new(config.clone());
-  let _log_index = router.new_cluster(btreeset! {0,1,2}, btreeset! {}).await?;
+  let mut router = RaftRouter::new(config);
+  router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
 
   let n0 = router.get_raft_handle(&0)?;
+  let n1 = router.get_raft_handle(&1)?;
   n0.wait(timeout())
     .state(ServerState::Leader, "node 0 is leader")
     .await?;
+  n1.wait(timeout())
+    .state(ServerState::Follower, "node 1 is follower")
+    .await?;
 
-  router.set_rpc_failure(
-    1,
-    NetSend,
-    Some(fixtures::rpc_error_type::RpcErrorType::NetworkError),
+  let follower_term_before = n1.metrics().borrow_watched().current_term;
+
+  router.set_network_error(1, true);
+  TypeConfig::sleep(Duration::from_millis(1500)).await;
+
+  let follower_term_after = n1.metrics().borrow_watched().current_term;
+  assert!(follower_term_after > follower_term_before);
+
+  Ok(())
+}
+
+/// 完全隔离的节点在返回 Unreachable 时不能算作 Pre-Vote Grant
+#[compio::test]
+async fn test_pre_vote_unreachable_peer_is_not_a_grant() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_pre_vote: Some(true),
+      ..Default::default()
+    }
+    .validate()?,
   );
 
-  let n1 = router.get_raft_handle(&1)?;
-  let _ = n1.trigger().elect(false).await;
-
-  n1.wait(timeout())
-    .metrics(
-      |m| m.state == ServerState::Candidate,
-      "node 1 stays candidate",
-    )
+  let mut router = RaftRouter::new(config);
+  router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
     .await?;
+
+  let n1 = router.get_raft_handle(&1)?;
+  n1.wait(timeout())
+    .state(ServerState::Follower, "node 1 is follower")
+    .await?;
+
+  let follower_term_before = n1.metrics().borrow_watched().current_term;
+
+  router.set_unreachable(1, true);
+  TypeConfig::sleep(Duration::from_millis(1000)).await;
+
+  assert_eq!(
+    follower_term_before,
+    n1.metrics().borrow_watched().current_term
+  );
 
   Ok(())
 }

@@ -33,7 +33,7 @@ async fn run_zenoh_session_ping_test(
     sleep(Duration::from_millis(100)).await;
     if let Ok(replies) = session2
       .get(&ping_key)
-      .payload(msg.to_vec())
+      .payload(msg)
       .timeout(Duration::from_secs(2))
       .await
     {
@@ -45,7 +45,7 @@ async fn run_zenoh_session_ping_test(
       }
     }
   }
-  panic!("Must receive reply over Zenoh queryable for {prefix}");
+  Err(format!("Must receive reply over Zenoh queryable for {prefix}").into())
 }
 
 /// 测试基于 QUIC Plain 传输的 Zenoh 会话通信

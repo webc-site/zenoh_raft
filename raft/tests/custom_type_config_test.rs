@@ -3,6 +3,8 @@
 
 #![allow(dead_code)]
 
+use std::vec::IntoIter;
+
 use zenoh_raft::{
   AnyError, BasicNode, Entry, EntryPayload, OptionalSend, RaftTypeConfig,
   batch::Batch,
@@ -31,7 +33,7 @@ impl<T> Extend<T> for VecBatch<T> {
 
 impl<T> IntoIterator for VecBatch<T> {
   type Item = T;
-  type IntoIter = std::vec::IntoIter<T>;
+  type IntoIter = IntoIter<T>;
 
   fn into_iter(self) -> Self::IntoIter {
     self.inner.into_iter()

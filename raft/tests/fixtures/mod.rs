@@ -68,10 +68,12 @@ pub fn log_id(term: u64, node_id: u64, index: u64) -> LogIdOf<TypeConfig> {
   )
 }
 
+/// 默认测试等待超时时间
 pub fn timeout() -> Option<Duration> {
   Some(Duration::from_millis(5_000))
 }
 
+/// 默认基础测试配置（关闭心跳与自动选举）
 pub fn default_test_config() -> Arc<Config> {
   Arc::new(
     Config {
@@ -84,6 +86,7 @@ pub fn default_test_config() -> Arc<Config> {
   )
 }
 
+/// 选举超时测试配置
 pub fn elect_test_config(min: u64, max: u64) -> Arc<Config> {
   Arc::new(
     Config {
@@ -97,6 +100,7 @@ pub fn elect_test_config(min: u64, max: u64) -> Arc<Config> {
   )
 }
 
+/// 从 LinearizableReadError 中提取 QuorumNotEnough 的响应节点集合
 pub fn expect_quorum_not_enough(
   err: RaftError<TypeConfig, LinearizableReadError<TypeConfig>>,
 ) -> BTreeSet<MemNodeId> {
@@ -107,6 +111,7 @@ pub fn expect_quorum_not_enough(
   }
 }
 
+/// 生成测试用动态可用端口
 pub fn get_available_port() -> u16 {
   static PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
   let offset = PORT_COUNTER.fetch_add(1, Ordering::Relaxed);

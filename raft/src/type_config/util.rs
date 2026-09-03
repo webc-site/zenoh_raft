@@ -2,6 +2,7 @@ use std::{
   error::Error,
   future::Future,
   io,
+  panic::AssertUnwindSafe,
   pin::Pin,
   task::{Context, Poll},
   thread,
@@ -11,7 +12,7 @@ use std::{
 use compio::runtime::{Runtime, spawn};
 use crossfire::oneshot::{RxOneshot, TxOneshot, oneshot as oneshot_channel};
 use futures_util::{
-  Stream,
+  FutureExt, Stream,
   future::{Either, select},
   stream::unfold,
 };
@@ -163,8 +164,9 @@ pub trait TypeConfigExt: RaftTypeConfig {
     if Runtime::try_current().is_some() {
       let (tx, rx) = oneshot_channel();
       spawn(async move {
-        let res = future.await;
-        tx.send(res);
+        if let Ok(res) = AssertUnwindSafe(future).catch_unwind().await {
+          tx.send(res);
+        }
       })
       .detach();
       JoinHandle::new(rx)

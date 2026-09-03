@@ -683,6 +683,8 @@ async fn test_initialize_err_not_allowed() -> Result<()> {
 /// 当 RaftCore 发生 panic 时，后续请求应返回 Fatal::Panicked
 #[compio::test]
 async fn test_return_error_after_panic() -> Result<()> {
+  use zenoh_raft::{testing::memstore::TypeConfig, type_config::TypeConfigExt};
+
   let config = Arc::new(
     Config {
       enable_heartbeat: false,
@@ -699,7 +701,10 @@ async fn test_return_error_after_panic() -> Result<()> {
     })
     .await?;
 
-  let res = router.client_request(0, "foo", 2).await;
+  TypeConfig::sleep(Duration::from_millis(100)).await;
+
+  let n0 = router.get_raft_handle(&0)?;
+  let res = n0.client_write(ClientRequest::make_request("foo", 2)).await;
   let err = res.unwrap_err();
   assert_eq!(Fatal::Panicked, err.into_fatal().unwrap());
 
@@ -778,4 +783,3 @@ async fn test_return_error_after_shutdown() -> Result<()> {
 
   Ok(())
 }
-

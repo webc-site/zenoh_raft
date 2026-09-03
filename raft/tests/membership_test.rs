@@ -948,3 +948,568 @@ async fn test_replication_state_not_reverted_when_adding_learner_as_voter() -> R
 
   Ok(())
 }
+
+use std::future::ready;
+
+use fixtures::rpc_request::RpcRequest;
+use zenoh_raft::{
+  Membership, StepDownPolicy, Vote,
+  async_runtime::BoxFuture,
+  errors::{
+    ChangeMembershipError, NetworkError, RPCError, UncommittedLeaderLog,
+    UnsupportedMembershipTransition,
+  },
+  network::RPCTypes,
+  testing::memstore::{ClientRequest, IntoMemClientRequest},
+};
+
+/// 移除 Leader 并将其转为 Learner 时，旧 Leader 提交 2 条成员变更日志后不卸任，保持为 Leader (非投票人 Leader)
+#[compio::test]
+async fn test_remove_leader_and_convert_to_learner() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      election_timeout_min: 800,
+      election_timeout_max: 1000,
+      enable_elect: false,
+      enable_heartbeat: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  let mut log_index = router
+    .new_cluster(btreeset! {0, 1}, btreeset! {2, 3})
+    .await?;
+
+  let old_leader = 0;
+  let node = router.get_raft_handle(&old_leader)?;
+  node.change_membership([1, 2, 3], true).await?;
+  log_index += 2;
+
+  router
+    .wait(&old_leader, timeout())
+    .applied_index(Some(log_index), "old leader commits 2 membership logs")
+    .await?;
+
+  TypeConfig::sleep(Duration::from_millis(500)).await;
+
+  router
+    .wait(&0, timeout())
+    .state(ServerState::Leader, "old leader stays as non-voter leader")
+    .await?;
+
+  Ok(())
+}
+
+/// 移除 Leader 时自动通过 leadership-transfer 移交领导权
+#[compio::test]
+async fn test_remove_leader_auto_transfer() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_elect: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  let _log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
+
+  let node = router.get_raft_handle(&0)?;
+  node.change_membership([1, 2], false).await?;
+
+  router
+    .wait(&1, timeout())
+    .metrics(
+      |x| matches!(x.current_leader, Some(1) | Some(2)) && x.current_term >= 2,
+      "a new leader is established by transfer-leader",
+    )
+    .await?;
+
+  let metrics = router
+    .wait(&0, timeout())
+    .state(ServerState::Learner, "removed leader steps down")
+    .await?;
+  assert_eq!(metrics.current_term, 1);
+
+  Ok(())
+}
+
+/// 禁用自动 step down 时，移除的 Leader 保持领导地位，直到手动 refresh_server_state
+#[compio::test]
+async fn test_remove_leader_manual_step_down() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_elect: false,
+      removed_leader_step_down: StepDownPolicy::Never,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  let _log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
+
+  let node = router.get_raft_handle(&0)?;
+  node.change_membership([1, 2], false).await?;
+
+  let res = router
+    .wait(&0, Some(Duration::from_millis(500)))
+    .metrics(
+      |x| x.state != ServerState::Leader,
+      "the removed leader leaves Leader state",
+    )
+    .await;
+  assert!(res.is_err());
+
+  node.trigger().refresh_server_state(None, None).await?;
+  router
+    .wait(&0, timeout())
+    .state(ServerState::Learner, "removed leader reverts to learner")
+    .await?;
+
+  Ok(())
+}
+
+/// 使用带防护条件的 refresh_server_state 卸任移除的 Leader
+#[compio::test]
+async fn test_remove_leader_fenced_step_down() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_elect: false,
+      removed_leader_step_down: StepDownPolicy::Never,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  let mut log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
+
+  let node = router.get_raft_handle(&0)?;
+  node.change_membership([1, 2], false).await?;
+  log_index += 2;
+
+  let metrics = router
+    .wait(&0, timeout())
+    .applied_index(Some(log_index), "applied membership logs")
+    .await?;
+  let vote = metrics.vote;
+  let membership_log_id = (*metrics.membership_config.log_id()).unwrap();
+
+  let mismatching_vote = Vote::new(100, 100);
+  node
+    .trigger()
+    .refresh_server_state(Some(mismatching_vote), None)
+    .await?;
+  let res = router
+    .wait(&0, Some(Duration::from_millis(500)))
+    .metrics(|x| x.state != ServerState::Leader, "leaves Leader")
+    .await;
+  assert!(res.is_err());
+
+  let mismatching_log_id = fixtures::log_id(1, 0, 1);
+  node
+    .trigger()
+    .refresh_server_state(None, Some(mismatching_log_id))
+    .await?;
+  let res = router
+    .wait(&0, Some(Duration::from_millis(500)))
+    .metrics(|x| x.state != ServerState::Leader, "leaves Leader")
+    .await;
+  assert!(res.is_err());
+
+  node
+    .trigger()
+    .refresh_server_state(Some(vote), Some(membership_log_id))
+    .await?;
+  router
+    .wait(&0, timeout())
+    .state(ServerState::Learner, "reverts to learner")
+    .await?;
+
+  Ok(())
+}
+
+/// 移除 Leader 并切换到仅节点 2，访问新集群不应返回指向已移除 Leader 的重定向
+#[compio::test]
+async fn test_remove_leader_access_new_cluster() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_elect: false,
+      removed_leader_step_down: StepDownPolicy::Never,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  let mut log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
+
+  let orig_leader = 0;
+  let node = router.get_raft_handle(&orig_leader)?;
+  node.change_membership([2], false).await?;
+  log_index += 2;
+
+  router
+    .wait(&2, timeout())
+    .metrics(|x| x.last_log_index == Some(log_index), "node 2 got logs")
+    .await?;
+
+  router
+    .wait(&orig_leader, timeout())
+    .applied_index(Some(log_index), "old leader committed")
+    .await?;
+
+  let res = router
+    .send_client_request(2, ClientRequest::make_request("foo", 1))
+    .await;
+  match res {
+    Ok(_) => panic!("expected error"),
+    Err(cli_err) => match cli_err.api_error().unwrap() {
+      ClientWriteError::ForwardToLeader(fwd) => {
+        assert!(fwd.leader_id.is_none());
+        assert!(fwd.leader_node.is_none());
+      }
+      _ => panic!("expected ForwardToLeader"),
+    },
+  }
+
+  let n2 = router.get_raft_handle(&2)?;
+  n2.runtime_config().elect(true);
+  n2.wait(timeout())
+    .state(ServerState::Leader, "n2 elects")
+    .await?;
+  log_index += 1;
+
+  router
+    .send_client_request(2, ClientRequest::make_request("foo", 1))
+    .await?;
+  log_index += 1;
+
+  n2.wait(timeout())
+    .applied_index(Some(log_index), "n2 handles write")
+    .await?;
+
+  Ok(())
+}
+
+/// 单个投票者的增删每次各写入一条日志
+#[compio::test]
+async fn test_add_and_remove_one_voter_write_one_entry_each() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_tick: false,
+      enable_heartbeat: false,
+      enable_elect: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  let mut log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {3})
+    .await?;
+  let leader = router.get_raft_handle(&0)?;
+
+  let proposed = Membership::new_with_defaults(vec![btreeset! {0, 1, 2, 3}], []);
+  let resp = leader
+    .append_membership(proposed.clone(), EntryPayload::Blank, [])
+    .await?;
+  log_index += 1;
+
+  assert_eq!(log_index, resp.log_id.index);
+  assert_eq!(Some(proposed), resp.membership);
+
+  for node_id in [0, 1, 2, 3] {
+    router
+      .wait(&node_id, timeout())
+      .applied_index(Some(log_index), "voter 3 added")
+      .await?;
+  }
+
+  let proposed = Membership::new_with_defaults(vec![btreeset! {0, 1, 2}], []);
+  let resp = leader
+    .append_membership(proposed.clone(), EntryPayload::Blank, [])
+    .await?;
+  log_index += 1;
+
+  assert_eq!(log_index, resp.log_id.index);
+  assert_eq!(Some(proposed), resp.membership);
+
+  for node_id in [0, 1, 2] {
+    router
+      .wait(&node_id, timeout())
+      .applied_index(Some(log_index), "voter 3 removed")
+      .await?;
+  }
+
+  Ok(())
+}
+
+/// 不支持的直接成员转换不写入日志并返回错误
+#[compio::test]
+async fn test_unsupported_transition_writes_no_log() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_tick: false,
+      enable_heartbeat: false,
+      enable_elect: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  let log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {3})
+    .await?;
+  let leader = router.get_raft_handle(&0)?;
+
+  let membership_before = leader.metrics().borrow_watched().membership_config.clone();
+
+  let proposed = Membership::new_with_defaults(vec![btreeset! {1, 2, 3}], []);
+  let err = leader
+    .append_membership(proposed, EntryPayload::Blank, [])
+    .await
+    .unwrap_err();
+
+  let transition = UnsupportedMembershipTransition {
+    previous: vec![btreeset! {0, 1, 2}],
+    proposed: vec![btreeset! {1, 2, 3}],
+  };
+  let want = ClientWriteError::ChangeMembershipError(
+    ChangeMembershipError::UnsupportedMembershipTransition(transition),
+  );
+  assert_eq!(RaftError::APIError(want), err);
+
+  let metrics = leader.metrics().borrow_watched().clone();
+  assert_eq!(Some(log_index), metrics.last_log_index);
+  assert_eq!(membership_before, metrics.membership_config);
+
+  Ok(())
+}
+
+/// 用户构造的 Joint 配置每次各用一条日志进入与退出
+#[compio::test]
+async fn test_joint_membership_is_entered_and_left_in_one_entry_each() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_tick: false,
+      enable_heartbeat: false,
+      enable_elect: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  let mut log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {3, 4})
+    .await?;
+  let leader = router.get_raft_handle(&0)?;
+
+  let configs = vec![
+    btreeset! {0, 1, 2},
+    btreeset! {2, 3, 4},
+    btreeset! {0, 3, 4},
+  ];
+  let proposed = Membership::new_with_defaults(configs, []);
+  let resp = leader
+    .append_membership(proposed.clone(), EntryPayload::Blank, [])
+    .await?;
+  log_index += 1;
+
+  assert_eq!(log_index, resp.log_id.index);
+  assert_eq!(Some(proposed), resp.membership);
+
+  for node_id in [0, 1, 2, 3, 4] {
+    router
+      .wait(&node_id, timeout())
+      .applied_index(Some(log_index), "joint config applied")
+      .await?;
+  }
+
+  let proposed = Membership::new_with_defaults(vec![btreeset! {0, 1, 2}], []);
+  let resp = leader
+    .append_membership(proposed.clone(), EntryPayload::Blank, [])
+    .await?;
+  log_index += 1;
+
+  assert_eq!(log_index, resp.log_id.index);
+  assert_eq!(Some(proposed), resp.membership);
+
+  for node_id in [0, 1, 2] {
+    router
+      .wait(&node_id, timeout())
+      .applied_index(Some(log_index), "uniform config applied")
+      .await?;
+  }
+
+  Ok(())
+}
+
+/// LastMembershipLogId 前置条件保护 append_membership
+#[compio::test]
+async fn test_membership_log_id_precondition_guards_the_append() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_tick: false,
+      enable_heartbeat: false,
+      enable_elect: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  let mut log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {3})
+    .await?;
+  let leader = router.get_raft_handle(&0)?;
+
+  let observed_log_id = *leader.metrics().borrow_watched().membership_config.log_id();
+
+  let precondition = Precondition::LastMembershipLogId {
+    last_membership_log_id: observed_log_id,
+  };
+  let proposed = Membership::new_with_defaults(vec![btreeset! {0, 1, 2, 3}], []);
+  let resp = leader
+    .append_membership(proposed, EntryPayload::Blank, [precondition])
+    .await?;
+  log_index += 1;
+  assert_eq!(log_index, resp.log_id.index);
+
+  let current_log_id = *leader.metrics().borrow_watched().membership_config.log_id();
+
+  let precondition = Precondition::LastMembershipLogId {
+    last_membership_log_id: observed_log_id,
+  };
+  let proposed = Membership::new_with_defaults(vec![btreeset! {0, 1, 2}], []);
+  let err = leader
+    .append_membership(proposed, EntryPayload::Blank, [precondition])
+    .await
+    .unwrap_err();
+
+  let want = PreconditionFailed::LastMembershipLogIdMismatch {
+    expected: observed_log_id,
+    actual: current_log_id,
+  };
+  assert_eq!(
+    RaftError::APIError(ClientWriteError::PreconditionFailed(want)),
+    err
+  );
+
+  let metrics = leader.metrics().borrow_watched().clone();
+  assert_eq!(Some(log_index), metrics.last_log_index);
+  assert_eq!(current_log_id, *metrics.membership_config.log_id());
+
+  Ok(())
+}
+
+/// 未提交的 Leader 空日志阻止 append_membership
+#[compio::test]
+async fn test_uncommitted_leader_log_blocks_the_append() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_elect: false,
+      heartbeat_interval: 50,
+      election_timeout_min: 500,
+      election_timeout_max: 501,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  let _log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {3})
+    .await?;
+  let old_leader = router.get_raft_handle(&0)?;
+  let new_leader = router.get_raft_handle(&1)?;
+
+  router
+    .set_rpc_pre_hook(RPCTypes::AppendEntries, |_router, req, from, to| {
+      let mut carries_entries = false;
+      if let RpcRequest::AppendEntries(append) = &req {
+        carries_entries = !append.entries.is_empty();
+      }
+
+      let res = if carries_entries {
+        let msg = format!("blocked: {from}->{to} append-entries with entries");
+        Err(RPCError::Network(NetworkError::<TypeConfig>::from_string(
+          msg,
+        )))
+      } else {
+        Ok(())
+      };
+      Box::pin(ready(res)) as BoxFuture<_>
+    })
+    .await;
+
+  old_leader.trigger().transfer_leader(1).await?;
+  new_leader
+    .wait(timeout())
+    .metrics(
+      |m| m.state == ServerState::Leader && m.last_quorum_acked.is_some(),
+      "node 1 leads and a quorum keeps acking it",
+    )
+    .await?;
+
+  let blocked_metrics = new_leader.metrics().borrow_watched().clone();
+  let noop_log_id = {
+    let leader_id = LeaderIdOf::<TypeConfig>::new_committed(blocked_metrics.current_term, 1);
+    LogIdOf::<TypeConfig>::new(leader_id, blocked_metrics.last_log_index.unwrap())
+  };
+  let proposed = Membership::new_with_defaults(vec![btreeset! {0, 1, 2, 3}], []);
+
+  let err = new_leader
+    .append_membership(proposed.clone(), EntryPayload::Blank, [])
+    .await
+    .unwrap_err();
+
+  let uncommitted = UncommittedLeaderLog {
+    committed: None,
+    leader_log_id: noop_log_id,
+  };
+  let want = ClientWriteError::ChangeMembershipError(ChangeMembershipError::UncommittedLeaderLog(
+    uncommitted,
+  ));
+  assert_eq!(RaftError::APIError(want), err);
+
+  let stale = Precondition::LastMembershipLogId {
+    last_membership_log_id: None,
+  };
+  let err = new_leader
+    .append_membership(proposed.clone(), EntryPayload::Blank, [stale])
+    .await
+    .unwrap_err();
+
+  let want = PreconditionFailed::LastMembershipLogIdMismatch {
+    expected: None,
+    actual: *blocked_metrics.membership_config.log_id(),
+  };
+  assert_eq!(
+    RaftError::APIError(ClientWriteError::PreconditionFailed(want)),
+    err
+  );
+
+  router.rpc_pre_hook(RPCTypes::AppendEntries, None).await;
+  new_leader
+    .wait(timeout())
+    .applied_index(Some(noop_log_id.index()), "blank log committed")
+    .await?;
+
+  let resp = new_leader
+    .append_membership(proposed.clone(), EntryPayload::Blank, [])
+    .await?;
+
+  assert_eq!(noop_log_id.index() + 1, resp.log_id.index);
+  assert_eq!(Some(proposed), resp.membership);
+
+  Ok(())
+}

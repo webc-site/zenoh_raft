@@ -1049,3 +1049,591 @@ async fn test_write_then_superseded_by_snapshot_install() -> Result<()> {
 
   Ok(())
 }
+
+use std::future::ready;
+
+use fixtures::{expect_quorum_not_enough, rpc_request::RpcRequest};
+use zenoh_raft::{
+  Instant, LinearizerOption, LogIdOptionExt,
+  async_runtime::BoxFuture,
+  errors::{LinearizableReadError, NetworkError, RPCError},
+  network::RPCTypes,
+  raft::TransferLeaderError,
+  vote::RaftLeaderId,
+};
+
+/// 转移目标节点离线时，不会阻碍后续新领导选举
+#[compio::test]
+async fn test_transfer_leader_with_dead_target_does_not_block_election() -> Result<()> {
+  let election_timeout_max = 300;
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      election_timeout_min: 150,
+      election_timeout_max,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  router.network_send_delay(0);
+  let _log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
+
+  let n0 = router.get_raft_handle(&0)?;
+  let n2 = router.get_raft_handle(&2)?;
+
+  router.set_network_error(1, true);
+
+  let r = router.clone();
+  TypeConfig::spawn(async move {
+    loop {
+      let _ = r.ensure_linearizable(0, ReadPolicy::ReadIndex).await;
+      TypeConfig::sleep(Duration::from_millis(20)).await;
+    }
+  });
+
+  n0.trigger().transfer_leader(1).await?;
+
+  let mut got = false;
+  for _ in 0..20 {
+    let res = n0.ensure_linearizable(ReadPolicy::ReadIndex).await;
+    if let Err(e) = &res
+      && let Some(LinearizableReadError::ForwardToLeader(fwd)) = e.api_error()
+      && fwd.leader_id == Some(1)
+    {
+      got = true;
+      break;
+    }
+    TypeConfig::sleep(Duration::from_millis(10)).await;
+  }
+  assert!(
+    got,
+    "expected ForwardToLeader(1) within 200ms after transfer"
+  );
+
+  n2.wait(Some(Duration::from_millis(5 * election_timeout_max)))
+    .state(
+      ServerState::Leader,
+      "n2 elects after n0 stops emitting read-index AE",
+    )
+    .await?;
+
+  Ok(())
+}
+
+/// 转移中的 Leader 必须拦截 LeaseRead 并重定向
+#[compio::test]
+async fn test_transfer_leader_blocks_lease_read() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      heartbeat_interval: 1000,
+      election_timeout_min: 1001,
+      election_timeout_max: 1002,
+      enable_heartbeat: false,
+      enable_elect: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  router.network_send_delay(0);
+  router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
+
+  let n0 = router.get_raft_handle(&0)?;
+
+  n0.wait(Some(Duration::from_millis(500)))
+    .leader_with_quorum_acked(None, "leader has last_quorum_acked")
+    .await?;
+
+  n0.ensure_linearizable(ReadPolicy::LeaseRead)
+    .await
+    .expect("LeaseRead succeeds on healthy leader");
+
+  router.set_network_error(1, true);
+  n0.trigger().transfer_leader(1).await?;
+
+  let mut got = false;
+  for _ in 0..20 {
+    let res = n0.ensure_linearizable(ReadPolicy::LeaseRead).await;
+    if let Err(e) = &res
+      && let Some(LinearizableReadError::ForwardToLeader(fwd)) = e.api_error()
+      && fwd.leader_id == Some(1)
+    {
+      got = true;
+      break;
+    }
+    TypeConfig::sleep(Duration::from_millis(10)).await;
+  }
+  assert!(
+    got,
+    "expected ForwardToLeader(1) for LeaseRead after transfer"
+  );
+
+  Ok(())
+}
+
+/// 领导转移选举请求可以覆盖其他投票者的租约
+#[compio::test]
+async fn test_transfer_leader_overrides_lease() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      election_timeout_min: 10_000,
+      election_timeout_max: 10_001,
+      enable_heartbeat: false,
+      enable_elect: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
+
+  let n0 = router.get_raft_handle(&0)?;
+  let n2 = router.get_raft_handle(&2)?;
+
+  let metrics = n0.metrics().borrow_watched().clone();
+  let leader_vote = metrics.vote;
+  let last_log_id = metrics.last_applied;
+
+  let req = TransferLeaderRequest::new(leader_vote, 2, last_log_id);
+  n2.handle_transfer_leader(req).await??;
+
+  n2.wait(timeout())
+    .state(ServerState::Leader, "node-2 becomes leader within lease")
+    .await?;
+  n0.wait(timeout())
+    .state(ServerState::Follower, "node-0 steps down")
+    .await?;
+
+  Ok(())
+}
+
+/// 向尚未同步提升日志的提升 Learner 转移领导权不应崩溃
+#[compio::test]
+async fn test_transfer_leader_to_promoted_learner_without_promotion_log_does_not_panic()
+-> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_tick: false,
+      election_timeout_min: 100,
+      election_timeout_max: 200,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  router.network_send_delay(0);
+
+  let mut log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {3})
+    .await?;
+  let n0 = router.get_raft_handle(&0)?;
+  let n3 = router.get_raft_handle(&3)?;
+
+  router
+    .wait(&3, timeout())
+    .metrics(
+      |m| {
+        m.state == ServerState::Learner
+          && !m.membership_config.voter_ids().any(|id| id == 3)
+          && m.last_log_index == Some(log_index)
+      },
+      "node 3 starts as caught-up learner",
+    )
+    .await?;
+
+  router.set_network_error(3, true);
+  n0.change_membership([0, 1, 2, 3], false).await?;
+  log_index += 2;
+
+  router
+    .wait(&0, timeout())
+    .metrics(
+      |m| {
+        m.membership_config.voter_ids().any(|id| id == 3)
+          && m.last_applied.as_ref().map(|log_id| log_id.index()) == Some(log_index)
+      },
+      "leader sees node 3 as voter",
+    )
+    .await?;
+
+  let leader_metrics = n0.metrics().borrow_watched().clone();
+  let expected_last_log_id = leader_metrics.last_applied;
+  let actual_last_log_id = n3.data_metrics().borrow_watched().last_log;
+  let req = TransferLeaderRequest::new(leader_metrics.vote, 3, expected_last_log_id);
+
+  let resp = n3.handle_transfer_leader(req).await;
+  assert_eq!(
+    Ok(Err(TransferLeaderError::LogNotFlushed {
+      expected: expected_last_log_id,
+      actual: actual_last_log_id,
+    })),
+    resp
+  );
+
+  TypeConfig::sleep(Duration::from_millis(50)).await;
+  assert!(n3.is_initialized().await.is_ok());
+
+  Ok(())
+}
+
+/// 测试读取日志 ID API (get_read_log_id)
+#[compio::test]
+async fn test_get_read_log_id() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_elect: false,
+      heartbeat_interval: 100,
+      election_timeout_min: 101,
+      election_timeout_max: 102,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  let mut log_index = router.new_cluster(btreeset! {0, 1}, btreeset! {}).await?;
+
+  let block_to_n0 = |_router: &_, req, _id, target| {
+    let err = || {
+      Err(RPCError::Network(NetworkError::<TypeConfig>::from_string(
+        "block append-entries to node 0",
+      )))
+    };
+
+    let res = if target == 0 {
+      match req {
+        RpcRequest::AppendEntries(a) => {
+          if a.entries.is_empty() {
+            Ok(())
+          } else {
+            err()
+          }
+        }
+        _ => unreachable!(),
+      }
+    } else {
+      Ok(())
+    };
+
+    Box::pin(ready(res)) as BoxFuture<_>
+  };
+
+  router
+    .set_rpc_pre_hook(RPCTypes::AppendEntries, block_to_n0)
+    .await;
+  TypeConfig::sleep(Duration::from_millis(200)).await;
+
+  let leader = router.leader().expect("leader found");
+  let read_log_id = router
+    .get_read_log_id(leader, ReadPolicy::ReadIndex)
+    .await?;
+  assert_eq!(read_log_id.0.index(), log_index);
+
+  router.rpc_pre_hook(RPCTypes::AppendEntries, None).await;
+  log_index += router.client_request_many(leader, "foo", 2).await?;
+
+  let read_log_id = router
+    .get_read_log_id(leader, ReadPolicy::ReadIndex)
+    .await?;
+  assert_eq!(read_log_id.0.index(), log_index);
+
+  Ok(())
+}
+
+/// 使用 ReadIndex 策略进行线性化读
+#[compio::test]
+async fn test_ensure_linearizable_with_read_index() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_elect: false,
+      heartbeat_interval: 100,
+      election_timeout_min: 101,
+      election_timeout_max: 102,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  router.network_send_delay(0);
+  let _log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
+
+  let leader = router.leader().expect("leader found");
+  assert_eq!(leader, 0);
+
+  let rpc_count_before = router.get_rpc_count();
+  let append_before = *rpc_count_before.get(&RPCTypes::AppendEntries).unwrap_or(&0);
+
+  router
+    .ensure_linearizable(leader, ReadPolicy::ReadIndex)
+    .await?;
+
+  let rpc_count_after = router.get_rpc_count();
+  let append_after = *rpc_count_after.get(&RPCTypes::AppendEntries).unwrap_or(&0);
+  assert!(append_after > append_before);
+
+  router.set_network_error(1, true);
+  router
+    .ensure_linearizable(leader, ReadPolicy::ReadIndex)
+    .await?;
+
+  router.set_network_error(2, true);
+  let res = router
+    .ensure_linearizable(leader, ReadPolicy::ReadIndex)
+    .await;
+  assert!(res.is_err());
+
+  Ok(())
+}
+
+/// 线性化读等待超时配置测试
+#[compio::test]
+async fn test_ensure_linearizable_with_wait_timeout() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_elect: false,
+      heartbeat_interval: 100,
+      election_timeout_min: 999,
+      election_timeout_max: 1000,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config.clone());
+  router.network_send_delay(0);
+  router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
+
+  let leader = router.get_raft_handle(&0)?;
+  router.set_network_error(1, true);
+  router.set_network_error(2, true);
+
+  let leader_lease = Duration::from_millis(config.election_timeout_max);
+  let lease_read_margin = leader_lease / 2;
+
+  {
+    let option =
+      LinearizerOption::new(Some(Duration::ZERO), true).with_wait_timeout(Duration::ZERO);
+    let start = Instant::now();
+    let res = leader.get_read_linearizer(option).await;
+    let elapsed = start.elapsed();
+
+    let got = expect_quorum_not_enough(res.unwrap_err());
+    assert_eq!(btreeset! {0}, got);
+    assert!(elapsed < lease_read_margin);
+  }
+
+  {
+    let wait_timeout = Duration::from_millis(100);
+    let option = LinearizerOption::new(Some(Duration::ZERO), true).with_wait_timeout(wait_timeout);
+    let start = Instant::now();
+    let res = leader.get_read_linearizer(option).await;
+    let elapsed = start.elapsed();
+
+    let got = expect_quorum_not_enough(res.unwrap_err());
+    assert_eq!(btreeset! {0}, got);
+    assert!(elapsed >= wait_timeout);
+    assert!(elapsed < lease_read_margin);
+  }
+
+  Ok(())
+}
+
+/// 当禁用即时心跳时，读排队等待周期性心跳
+#[compio::test]
+async fn test_linearizer_waits_for_periodic_heartbeat_when_immediate_heartbeat_disabled()
+-> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_elect: false,
+      heartbeat_interval: 100,
+      election_timeout_min: 1001,
+      election_timeout_max: 1002,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config.clone());
+  router.network_send_delay(0);
+  let log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
+
+  let leader = router.leader().expect("leader found");
+  TypeConfig::sleep(Duration::from_millis(300)).await;
+
+  let leader_handle = router.get_raft_handle(&leader).unwrap();
+  let metrics = leader_handle.metrics().borrow_watched().clone();
+  let expected_leader_id = metrics.vote.leader_id().to_committed();
+  let expected_applied = metrics.last_applied;
+
+  TypeConfig::sleep(Duration::from_millis(config.election_timeout_max)).await;
+
+  let rpc_count_before = router.get_rpc_count();
+  let before = *rpc_count_before.get(&RPCTypes::AppendEntries).unwrap_or(&0);
+
+  let option = LinearizerOption::new(None, false);
+  let mut read_future = Box::pin(leader_handle.get_read_linearizer(option));
+  let submitted_status = futures_util::poll!(read_future.as_mut());
+  assert!(submitted_status.is_pending());
+
+  leader_handle.with_raft_state(|_| ()).await?;
+  let queued_status = futures_util::poll!(read_future.as_mut());
+  assert!(queued_status.is_pending());
+
+  let rpc_count_after = router.get_rpc_count();
+  let after = *rpc_count_after.get(&RPCTypes::AppendEntries).unwrap_or(&0);
+  assert_eq!(before, after);
+
+  leader_handle.runtime_config().heartbeat(true);
+  let heartbeat_wait = Duration::from_millis(config.heartbeat_interval * 5);
+  let heartbeat_result = TypeConfig::timeout(heartbeat_wait, read_future).await;
+  leader_handle.runtime_config().heartbeat(false);
+
+  let linearizer = heartbeat_result.expect("heartbeat completes queued read")?;
+  assert_eq!(
+    (
+      &leader,
+      &expected_leader_id,
+      log_index,
+      expected_applied.as_ref()
+    ),
+    (
+      linearizer.node_id(),
+      linearizer.read_log_id().committed_leader_id(),
+      linearizer.read_log_id().index(),
+      linearizer.applied()
+    )
+  );
+
+  Ok(())
+}
+
+/// 从 Follower 发起线性化读应当失败
+#[compio::test]
+async fn test_ensure_linearizable_not_process_from_followers() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_elect: false,
+      heartbeat_interval: 100,
+      election_timeout_min: 101,
+      election_timeout_max: 102,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  router.network_send_delay(0);
+  router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
+
+  let leader = router.leader().expect("leader found");
+  assert_eq!(leader, 0);
+
+  router
+    .ensure_linearizable(1, ReadPolicy::ReadIndex)
+    .await
+    .expect_err("follower 1 should fail ReadIndex");
+
+  router
+    .ensure_linearizable(1, ReadPolicy::LeaseRead)
+    .await
+    .expect_err("follower 1 should fail LeaseRead");
+
+  Ok(())
+}
+
+/// Follower 追赶 Leader applied 状态后可服务本地线性化读
+#[compio::test]
+async fn test_ensure_linearizable_process_from_followers() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_elect: false,
+      heartbeat_interval: 100,
+      election_timeout_min: 101,
+      election_timeout_max: 102,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  router.network_send_delay(0);
+  let mut log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
+
+  let leader_node_id = router.leader().expect("leader found");
+  let leader = router.get_raft_handle(&leader_node_id).unwrap();
+
+  let block_to_follower_n1 = |_router: &_, req, _id, target| {
+    let err = || {
+      Err(RPCError::Network(NetworkError::<TypeConfig>::from_string(
+        "block append-entries to follower 1",
+      )))
+    };
+
+    let res = if target == 1 {
+      match req {
+        RpcRequest::AppendEntries(a) => {
+          if a.entries.is_empty() {
+            Ok(())
+          } else {
+            err()
+          }
+        }
+        _ => unreachable!(),
+      }
+    } else {
+      Ok(())
+    };
+
+    Box::pin(ready(res)) as BoxFuture<_>
+  };
+
+  router
+    .set_rpc_pre_hook(RPCTypes::AppendEntries, block_to_follower_n1)
+    .await;
+  log_index += router.client_request_many(leader_node_id, "foo", 1).await?;
+  leader
+    .wait(timeout())
+    .applied_index(Some(log_index), "applied")
+    .await?;
+
+  let linearizer = leader.get_read_linearizer(ReadPolicy::ReadIndex).await?;
+  assert_eq!(linearizer.read_log_id().index(), log_index);
+  assert_eq!(linearizer.applied().index(), Some(log_index));
+
+  let follower_n1 = router.get_raft_handle(&1).unwrap();
+  let res = linearizer
+    .clone()
+    .try_await_ready(&follower_n1, Some(Duration::from_millis(500)))
+    .await?;
+  assert!(res.is_err(), "follower n1 blocked from last log");
+
+  let follower_n2 = router.get_raft_handle(&2).unwrap();
+  let state = linearizer.await_ready(&follower_n2).await?;
+  assert_eq!(state.applied().index(), Some(log_index));
+
+  router.rpc_pre_hook(RPCTypes::AppendEntries, None).await;
+  let linearizer2 = leader.get_read_linearizer(ReadPolicy::ReadIndex).await?;
+  let state = linearizer2.await_ready(&follower_n1).await?;
+  assert_eq!(state.applied().index(), Some(log_index));
+
+  Ok(())
+}

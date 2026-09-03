@@ -879,3 +879,177 @@ async fn test_lost_snapshot_trigger() -> Result<()> {
 
   Ok(())
 }
+
+/// 当 Follower/Learner 所需的日志已被清除时，Leader 自动切换为快照复制
+#[compio::test]
+async fn test_switch_to_snapshot_replication_when_lacking_log() -> Result<()> {
+  let snapshot_threshold: u64 = 20;
+  let log_cnt = snapshot_threshold + 11;
+
+  let config = Arc::new(
+    Config {
+      snapshot_policy: SnapshotPolicy::LogsSinceLast(snapshot_threshold),
+      max_in_snapshot_log_to_keep: 0,
+      purge_batch_size: 1,
+      enable_heartbeat: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+
+  let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
+
+  router
+    .client_request_many(0, "0", (snapshot_threshold - 1 - log_index) as usize)
+    .await?;
+  log_index = snapshot_threshold - 1;
+
+  router
+    .wait(&0, None)
+    .applied_index(Some(log_index), "send log to trigger snapshot")
+    .await?;
+  router
+    .wait(&0, None)
+    .snapshot(log_id(1, 0, log_index), "snapshot")
+    .await?;
+
+  {
+    let (mut sto, mut sm) = router.get_storage_handle(&0)?;
+    assert_eq!(
+      sto.get_log_state().await?.last_log_id,
+      Some(log_id(1, 0, log_index))
+    );
+    assert_eq!(sto.read_vote().await?, Some(Vote::new_committed(1, 0)));
+
+    let (last_applied, _) = sm.applied_state().await?;
+    assert_eq!(last_applied, Some(log_id(1, 0, log_index)));
+
+    let snap = sm.get_current_snapshot().await?.unwrap();
+    assert_eq!(snap.meta.last_log_id, Some(log_id(1, 0, log_index)));
+  }
+
+  router
+    .client_request_many(0, "0", (log_cnt - log_index) as usize)
+    .await?;
+  log_index = log_cnt;
+
+  router.new_raft_node(1).await;
+  router.add_learner(0, 1).await?;
+  log_index += 1;
+
+  for id in [0, 1] {
+    router
+      .wait(&id, None)
+      .applied_index(Some(log_index), "add learner")
+      .await?;
+  }
+  router
+    .wait(&1, None)
+    .snapshot(log_id(1, 0, snapshot_threshold - 1), "")
+    .await?;
+
+  for id in [0, 1] {
+    let (mut sto, mut sm) = router.get_storage_handle(&id)?;
+    assert_eq!(
+      sto.get_log_state().await?.last_log_id,
+      Some(log_id(1, 0, log_index))
+    );
+    assert_eq!(sto.read_vote().await?, Some(Vote::new_committed(1, 0)));
+
+    let (last_applied, _) = sm.applied_state().await?;
+    assert_eq!(last_applied, Some(log_id(1, 0, log_index)));
+
+    let snap = sm.get_current_snapshot().await?.unwrap();
+    assert_eq!(
+      snap.meta.last_log_id,
+      Some(log_id(1, 0, snapshot_threshold - 1))
+    );
+  }
+
+  Ok(())
+}
+
+/// 向不可达节点传输快照时不应永久阻塞
+#[compio::test]
+async fn test_snapshot_to_unreachable_node_should_not_block() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      purge_batch_size: 1,
+      max_in_snapshot_log_to_keep: 0,
+      enable_heartbeat: false,
+      enable_elect: false,
+      backoff: "10ms, 10ms".to_string(),
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  let mut log_index = router.new_cluster(btreeset! {0, 1}, btreeset! {2}).await?;
+
+  router.set_network_error(2, true);
+
+  let n = 10;
+  log_index += router.client_request_many(0, "0", n).await?;
+  router
+    .wait(&0, timeout())
+    .applied_index(Some(log_index), "writes")
+    .await?;
+
+  let n0 = router.get_raft_handle(&0)?;
+  n0.trigger().snapshot().await?;
+  n0.wait(timeout())
+    .snapshot(log_id(1, 0, log_index), "snapshot")
+    .await?;
+  n0.wait(timeout())
+    .purged(Some(log_id(1, 0, log_index)), "purged")
+    .await?;
+
+  n0.change_membership([0], true).await?;
+  n0.wait(timeout())
+    .voter_ids([0], "change membership to {0}")
+    .await?;
+
+  Ok(())
+}
+
+/// install_full_snapshot 使用更低的 Vote 应被拒绝
+#[compio::test]
+async fn test_install_snapshot_lower_vote() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_tick: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config);
+  let _log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
+
+  let n0 = router.get_raft_handle(&0)?;
+  n0.trigger().snapshot().await?;
+  n0.wait(timeout())
+    .snapshot(log_id(1, 0, _log_index), "snapshot")
+    .await?;
+
+  let snap = n0.get_snapshot().await?.unwrap();
+
+  let _res = n0
+    .append_entries(AppendEntriesRequest {
+      vote: Vote::new_committed(2, 1),
+      prev_log_id: None,
+      entries: vec![],
+      leader_commit: None,
+    })
+    .await;
+  let vote = n0.with_raft_state(|st| *st.vote_ref()).await?;
+  assert_eq!(Vote::new_committed(2, 1), vote);
+
+  let got = n0
+    .install_full_snapshot(Vote::new_committed(1, 1), snap)
+    .await?;
+  assert_eq!(Vote::new_committed(2, 1), got.vote);
+
+  Ok(())
+}

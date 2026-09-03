@@ -971,11 +971,9 @@ use std::{
   sync::atomic::{AtomicU64, Ordering},
   time::Duration,
 };
+
 use zenoh_raft::{
-  SnapshotPolicy,
-  metrics::MetricsRecorder,
-  storage::RaftLogStorage,
-  testing::memstore::TypeConfig,
+  SnapshotPolicy, metrics::MetricsRecorder, storage::RaftLogStorage, testing::memstore::TypeConfig,
 };
 
 #[derive(Debug, Default)]
@@ -1133,7 +1131,9 @@ async fn test_metrics_recorder_on_follower() -> Result<()> {
 
   let recorder = Arc::new(TestRecorder::default());
   let follower = router.get_raft_handle(&1)?;
-  follower.set_metrics_recorder(Some(recorder.clone())).await?;
+  follower
+    .set_metrics_recorder(Some(recorder.clone()))
+    .await?;
 
   let leader_id = router.leader().expect("leader found");
   log_index += router.client_request_many(leader_id, "test", 5).await?;
@@ -1235,5 +1235,3 @@ async fn test_leader_last_ack() -> Result<()> {
 
   Ok(())
 }
-
-

@@ -584,3 +584,172 @@ async fn test_storage_error_stops_replication() -> Result<()> {
 
   Ok(())
 }
+
+use zenoh_raft::{
+  errors::{AllowNextRevertError, ForwardToLeader, NodeNotFound, Operation},
+  testing::memstore::new_mem_store,
+};
+
+/// 开启 allow_log_reversion 后，Leader 允许 Follower 将日志回退到更早的状态
+#[compio::test]
+async fn test_feature_loosen_follower_log_revert() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_tick: false,
+      enable_heartbeat: false,
+      max_payload_entries: 1,
+      allow_log_reversion: Some(true),
+      ..Default::default()
+    }
+    .validate()?,
+  );
+
+  let mut router = RaftRouter::new(config);
+  let mut log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {3})
+    .await?;
+
+  log_index += router.client_request_many(0, "0", 10).await?;
+  for i in [0, 1, 2, 3] {
+    router
+      .wait(&i, timeout())
+      .applied_index(Some(log_index), "10 writes")
+      .await?;
+  }
+
+  let (_raft, _ls, _sm) = router.remove_node(3).unwrap();
+  let (log, sm) = new_mem_store();
+
+  router.new_raft_node_with_sto(3, log, sm).await;
+  router.add_learner(0, 3).await?;
+  log_index += 1;
+
+  log_index += router.client_request_many(0, "0", 10).await?;
+  for i in [0, 1, 2, 3] {
+    router
+      .wait(&i, timeout())
+      .applied_index(Some(log_index), "10 writes")
+      .await?;
+  }
+
+  Ok(())
+}
+
+/// 通过 Trigger::allow_next_revert 单次允许 Follower 日志回滚
+#[compio::test]
+async fn test_allow_follower_log_revert() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_tick: false,
+      enable_heartbeat: false,
+      max_payload_entries: 1,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+
+  let mut router = RaftRouter::new(config);
+  let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {1}).await?;
+
+  log_index += router.client_request_many(0, "0", 10).await?;
+  for i in [0, 1] {
+    router
+      .wait(&i, timeout())
+      .applied_index(Some(log_index), "10 writes")
+      .await?;
+  }
+
+  let n0 = router.get_raft_handle(&0)?;
+  n0.trigger().allow_next_revert(&1, true).await??;
+
+  let (_raft, _ls, _sm) = router.remove_node(1).unwrap();
+  let (log, sm) = new_mem_store();
+
+  router.new_raft_node_with_sto(1, log, sm).await;
+  router.add_learner(0, 1).await?;
+  log_index += 1;
+
+  log_index += router.client_request_many(0, "0", 10).await?;
+  for i in [0, 1] {
+    router
+      .wait(&i, timeout())
+      .applied_index(Some(log_index), "10 writes")
+      .await?;
+  }
+
+  Ok(())
+}
+
+/// Trigger::allow_next_revert 调用时的错误处理
+#[compio::test]
+async fn test_allow_follower_log_revert_errors() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_tick: false,
+      enable_heartbeat: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+
+  let mut router = RaftRouter::new(config);
+  let _log_index = router.new_cluster(btreeset! {0}, btreeset! {1}).await?;
+
+  let n0 = router.get_raft_handle(&0)?;
+  let res = n0.trigger().allow_next_revert(&2, true).await?;
+  assert_eq!(
+    Err(AllowNextRevertError::NodeNotFound(NodeNotFound::new(
+      2,
+      Operation::AllowNextRevert
+    ))),
+    res
+  );
+
+  let n1 = router.get_raft_handle(&1)?;
+  let res = n1.trigger().allow_next_revert(&0, true).await?;
+  assert_eq!(
+    Err(AllowNextRevertError::ForwardToLeader(ForwardToLeader::new(
+      0,
+      ()
+    ))),
+    res
+  );
+
+  Ok(())
+}
+
+/// Follower 状态清空后重启，Leader 通过心跳发现并自动恢复
+#[compio::test]
+async fn test_follower_clear_restart_recover() -> Result<()> {
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_elect: false,
+      allow_log_reversion: Some(true),
+      ..Default::default()
+    }
+    .validate()?,
+  );
+
+  let mut router = RaftRouter::new(config);
+  router.enable_saving_committed = false;
+
+  let log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
+
+  let (n1, _log, _sm) = router.remove_node(1).unwrap();
+  n1.shutdown().await?;
+
+  router.new_raft_node(1).await;
+
+  let n0 = router.get_raft_handle(&0)?;
+  n0.trigger().heartbeat().await?;
+
+  let n1 = router.get_raft_handle(&1)?;
+  n1.wait(timeout())
+    .applied_index(Some(log_index), "should recovered")
+    .await?;
+
+  Ok(())
+}
