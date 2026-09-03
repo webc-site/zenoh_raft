@@ -1,3 +1,4 @@
+//! Raft network and service implementation powered by Zenoh transport layer
 //! 基于 Zenoh 传输层的 Raft 网络与服务实现
 
 pub mod client;

@@ -1,3 +1,6 @@
+//! Zenoh Raft server implementation for listening to and dispatching remote RPCs
+//! 基于 Zenoh 的 Raft 服务端实现，用于监听并分发远端 RPC 请求
+
 use std::{fmt::Display, io::Cursor};
 
 use anyerror::AnyError;
@@ -18,6 +21,7 @@ use crate::{
 
 const ERR_UNKNOWN_ROUTE: &str = "unknown RPC route";
 
+/// Zenoh Raft server for listening to remote RPC requests and dispatching them
 /// Zenoh Raft 服务端，用于监听远端 RPC 请求并分发处理
 pub struct ZenohRaftServer {
   _queryable: Queryable<()>,
@@ -55,6 +59,7 @@ async fn reply_rpc_err(query: &Query, rpc: &str, err: impl Display) {
 }
 
 impl ZenohRaftServer {
+  /// Start the Zenoh Raft server
   /// 启动 Zenoh Raft 服务端
   pub async fn start<C, SM>(
     session: &zenoh::Session,

@@ -171,20 +171,26 @@ where
 
   pub(crate) rx_api: BatchRaftMsgReceiver<C>,
 
-  /// 保持 `rx_api` 通道活跃的 keepalive sender。
-  ///
+  /// Keepalive sender to keep `rx_api` channel open
+  /// When application drops last `Raft` handle, this sender keeps channel open,
+  /// so core shuts down only via `rx_shutdown`, avoiding truncating active `stream_append`
+  /// 保持 `rx_api` 通道活跃的 keepalive sender
   /// 当应用层最后一个 `Raft` handle drop 后，此 sender 仍保持通道打开，
-  /// 使 core 仅通过 `rx_shutdown` 关闭，避免截断正在进行的 `stream_append`。
+  /// 使 core 仅通过 `rx_shutdown` 关闭，避免截断正在进行的 `stream_append`
   #[expect(dead_code)]
   pub(crate) tx_api: MpscSenderOf<C, RaftMsg<C>>,
 
-  /// Receiver of the dedicated channel that delivers a full snapshot to install.
+  /// Receiver of the dedicated channel that delivers a full snapshot to install
   ///
   /// The snapshot data type is defined by the state machine, thus it does not go through
-  /// `rx_api`, which is independent of the state machine type.
+  /// `rx_api`, which is independent of the state machine type
+  /// 用于接收待安装完整快照的专用通道接收端
+  ///
+  /// 快照数据类型由状态机定义，因此不经过与状态机类型解耦的 `rx_api` 通道
   pub(crate) rx_install_snapshot: MpscReceiverOf<C, InstallFullSnapshotRequest<C, SM>>,
 
-  /// 保持 `rx_install_snapshot` 通道活跃的 keepalive sender。
+  /// Keepalive sender to keep `rx_install_snapshot` channel open
+  /// 保持 `rx_install_snapshot` 通道活跃的 keepalive sender
   #[expect(dead_code)]
   pub(crate) tx_install_snapshot: MpscSenderOf<C, InstallFullSnapshotRequest<C, SM>>,
 
@@ -1317,6 +1323,7 @@ where
   /// If the input channel is closed, it returns `Fatal::Stopped`.
   async fn process_raft_msg(&mut self, at_most: u64) -> Result<u64, Fatal<C>> {
     let mut total = 0u64;
+    // Accumulate log entries before batch executing commands to reduce run_engine_commands calls
     // 累积一定数量的日志条目后再批量执行命令，减少 run_engine_commands 调用频率
     let run_command_threshold = 64u64;
     let mut last_log_index = 0;
@@ -1333,6 +1340,7 @@ where
       let index = self.engine.state.last_log_id().next_index();
 
       if index.saturating_sub(last_log_index) >= run_command_threshold {
+        // Batch execute commands after accumulating enough logs
         // 累积了足够多的日志后，批量执行命令
         self.run_engine_commands().await?;
 
@@ -1340,6 +1348,7 @@ where
       }
     }
 
+    // Execute remaining commands after processing all inputs
     // 处理完所有输入后，执行剩余的命令
     self.run_engine_commands().await?;
 
@@ -1359,6 +1368,7 @@ where
   /// If the input channel is closed, it returns `Fatal::Stopped`.
   async fn process_notification(&mut self, at_most: u64) -> Result<u64, Fatal<C>> {
     let mut processed = 0u64;
+    // Batch process notifications before executing commands to reduce run_engine_commands calls
     // 批量处理通知后再执行命令，减少 run_engine_commands 调用次数
     let batch_flush_threshold = 16u64;
     let mut since_last_flush = 0u64;
@@ -1389,6 +1399,7 @@ where
       }
     }
 
+    // Execute remaining commands after processing all notifications
     // 处理完所有通知后，执行剩余的命令
     if since_last_flush > 0 {
       self.run_engine_commands().await?;
@@ -1534,6 +1545,7 @@ where
   {
     let voter_ids = self.engine.state.membership_state.effective().voter_ids();
 
+    // Collect target nodes and their information for broadcasting
     // 收集需要广播的目标节点及其信息
     let targets: smallvec::SmallVec<[(C::NodeId, C::Node); 8]> = voter_ids
       .filter(|target| *target != self.id)
@@ -1551,6 +1563,7 @@ where
       })
       .collect();
 
+    // Batch create all network clients under a single lock acquisition to reduce lock contention
     // 一次持锁批量创建所有 network client，减少锁竞争
     let clients: smallvec::SmallVec<[(C::NodeId, NF::Network); 8]> = {
       let mut factory = self.network_factory.lock().await;
@@ -1767,6 +1780,8 @@ where
     match cmd {
       ExternalCommand::Elect { pre_vote } => {
         if self.engine.leader.is_some() {
+          // Leader cannot initiate election: heartbeats refresh followers' leader lease,
+          // and unexpired leases will reject vote requests
           // Leader 不能发起竞选：自身心跳会刷新 follower 的 leader lease，
           // 未过期的 lease 会拒绝 vote 请求
           log::info!("ExternalCommand: already a Leader, ignore election trigger");
@@ -1933,6 +1948,7 @@ where
           progress
         );
 
+        // Clean up handle after snapshot transfer finishes to avoid memory leaks
         // 快照传输完成后清理 handle，避免内存泄漏
         if inflight_id.is_some()
           && let Some(node) = self.replications.get_mut(&progress.target)
@@ -2004,6 +2020,7 @@ where
 
     match io_id {
       IOId::Log(log_io_id) => {
+        // No need to check membership change: local log will not revert due to membership changes
         // 无需检查成员变更：本地日志不会因成员变更而回退
         if let Some(leader) = self.engine.leader.as_ref()
           && Self::does_vote_match(

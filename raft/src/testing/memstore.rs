@@ -25,18 +25,23 @@ use crate::{
   type_config::TypeConfigExt,
 };
 
+/// Test application request type
 /// 测试应用请求类型
 #[derive(Debug, Clone, PartialEq, Eq, bitcode::Encode, bitcode::Decode, derive_more::Display)]
 #[display("ClientRequest{{client:{client}, serial:{serial}, status:{status}}}")]
 pub struct ClientRequest {
+  /// Client identifier
   /// 客户端标识
   pub client: String,
+  /// Request sequence number
   /// 请求序列号
   pub serial: u64,
+  /// Status description
   /// 状态描述
   pub status: String,
 }
 
+/// Generic testing helper to construct ClientRequest
 /// 泛型测试辅助构建 ClientRequest
 pub trait IntoMemClientRequest<T> {
   fn make_request(client_id: impl ToString, serial: u64) -> T;
@@ -52,6 +57,7 @@ impl IntoMemClientRequest<ClientRequest> for ClientRequest {
   }
 }
 
+/// Test application response type
 /// 测试应用响应类型
 #[derive(Debug, Clone, PartialEq, Eq, bitcode::Encode, bitcode::Decode)]
 pub struct ClientResponse(pub Option<String>);
@@ -70,6 +76,7 @@ crate::declare_raft_types!(
 
 pub type MemConfig = TypeConfig;
 
+/// Snapshot data structure
 /// 快照数据结构
 #[derive(Debug, Clone)]
 pub struct MemStoreSnapshot {
@@ -77,6 +84,7 @@ pub struct MemStoreSnapshot {
   pub data: Vec<u8>,
 }
 
+/// State machine internal data
 /// 状态机内部数据
 #[derive(Debug, Default, Clone, PartialEq, Eq, bitcode::Encode, bitcode::Decode)]
 pub struct MemStoreStateMachine {
@@ -85,6 +93,7 @@ pub struct MemStoreStateMachine {
   pub client_status: BTreeMap<String, String>,
 }
 
+/// Blocking operation type
 /// 阻塞操作类型
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BlockOperation {
@@ -93,6 +102,7 @@ pub enum BlockOperation {
   PurgeLog,
 }
 
+/// Simulated latency and blocking configuration
 /// 模拟延迟与阻塞配置
 #[derive(Clone, Debug, Default)]
 pub struct BlockConfig {
@@ -113,6 +123,7 @@ impl BlockConfig {
   }
 }
 
+/// In-memory log storage
 /// 内存日志存储
 pub struct MemLogStore {
   last_purged_log_id: AsyncMutex<Option<LogIdOf<TypeConfig>>>,
@@ -150,6 +161,7 @@ impl MemLogStore {
   }
 }
 
+/// In-memory state machine
 /// 内存状态机
 pub struct MemStateMachine {
   sm: AsyncMutex<MemStoreStateMachine>,
@@ -201,6 +213,7 @@ impl MemStateMachine {
   }
 }
 
+/// Create new in-memory store and state machine
 /// 创建新的内存存储和状态机
 pub fn new_mem_store() -> (Arc<MemLogStore>, Arc<MemStateMachine>) {
   let block = BlockConfig::default();

@@ -1,6 +1,7 @@
 #![recursion_limit = "256"]
 
-//! 基于真实 Zenoh QUIC Plain 与 QUIC TLS 传输层的分布式 Raft 集群集成测试
+//! Distributed Raft cluster integration tests based on real Zenoh transport layers (QUIC Plain, QUIC TLS, and TCP)
+//! 基于真实 Zenoh 传输层（QUIC Plain、QUIC TLS 与 TCP）的分布式 Raft 集群集成测试
 
 mod fixtures;
 
@@ -98,28 +99,15 @@ async fn run_3node_cluster_test(
   Ok(())
 }
 
-/// 3 节点基于 QUIC Plain 传输层的 Raft 集群测试
-#[compio::test]
-async fn test_zenoh_raft_cluster_over_quic_plain() -> Result<()> {
-  let key_prefix = "test_zenoh_quic_plain";
-  let port = get_available_port();
-  let ep = format!("127.0.0.1:{port}");
-
-  let session = Arc::new(
-    ZenohSessionBuilder::new()
-      .quic_plain(&ep, true)
-      .open()
-      .await
-      .map_err(|e| anyhow::anyhow!("{e}"))?,
-  );
-
-  run_3node_cluster_test(session, key_prefix, "zenoh_plain_k").await
-}
-
+/// 3-node Raft cluster test over QUIC TLS transport
 /// 3 节点基于 QUIC TLS 传输层的 Raft 集群测试
 #[compio::test]
 async fn test_zenoh_raft_cluster_over_quic_tls() -> Result<()> {
-  let tls_config = ZenohTlsConfig::self_signed().map_err(|e| anyhow::anyhow!("{e}"))?;
+  let cert = rcgen::generate_simple_self_signed(["localhost".to_string()])
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+  let cert_pem = cert.cert.pem();
+  let key_pem = cert.signing_key.serialize_pem();
+  let tls_config = ZenohTlsConfig::from_pem(&cert_pem, &key_pem, Some(&cert_pem), false);
 
   let key_prefix = "test_zenoh_quic_tls";
   let port = get_available_port();
@@ -134,4 +122,42 @@ async fn test_zenoh_raft_cluster_over_quic_tls() -> Result<()> {
   );
 
   run_3node_cluster_test(session, key_prefix, "zenoh_tls_k").await
+}
+
+/// 3-node Raft cluster test over QUIC Plain (UDP + rel=1 + multistream=1, certificate-free)
+/// 3 节点基于 QUIC Plain (UDP + rel=1 + multistream=1, 免证书) 的 Raft 集群测试
+#[compio::test]
+async fn test_zenoh_raft_cluster_over_quic_plain() -> Result<()> {
+  let key_prefix = "test_zenoh_quic_plain";
+  let port = get_available_port();
+  let ep = format!("127.0.0.1:{port}");
+
+  let session = Arc::new(
+    ZenohSessionBuilder::new()
+      .quic_plain(&ep, true)
+      .open()
+      .await
+      .map_err(|e| anyhow::anyhow!("{e}"))?,
+  );
+
+  run_3node_cluster_test(session, key_prefix, "zenoh_quic_plain_k").await
+}
+
+/// 3-node Raft cluster test over native plain TCP transport
+/// 3 节点基于原生纯明文 TCP 传输层的 Raft 集群测试
+#[compio::test]
+async fn test_zenoh_raft_cluster_over_tcp() -> Result<()> {
+  let key_prefix = "test_zenoh_tcp";
+  let port = get_available_port();
+  let ep = format!("127.0.0.1:{port}");
+
+  let session = Arc::new(
+    ZenohSessionBuilder::new()
+      .tcp(&ep, true)
+      .open()
+      .await
+      .map_err(|e| anyhow::anyhow!("{e}"))?,
+  );
+
+  run_3node_cluster_test(session, key_prefix, "zenoh_tcp_k").await
 }

@@ -18,7 +18,7 @@ Key capabilities include:
 ## Key Features
 
 - **Native Zenoh Transport**: Direct mapping of Raft RPCs (AppendEntries, RequestVote, InstallSnapshot, TransferLeader) to Zenoh query expressions, providing zero-configuration routing across edge, cloud, and mesh networks.
-- **QUIC Session Builder**: Integrated `ZenohSessionBuilder` and `ZenohTlsConfig`, supporting automatic self-signed certificate generation (`quic_plain`) and custom TLS security credentials (`quic_tls`) out of the box.
+- **Native Multi-Transport Session Builder**: Integrated `ZenohSessionBuilder`, supporting UDP-based certificate-free QUIC Plain reliable multistream transport (`quic_plain`), native plain TCP transport (`tcp`), and QUIC TLS transport with custom security credentials (`quic_tls`) out of the box.
 - **Multi-Dimensional Progress Tracking**: Non-blocking observation (`watch_*_progress`) and asynchronous threshold synchronization (`wait_until_ge`) for log I/O flushes (`FlushPoint`), vote persistence, quorum commits, snapshots, and state machine application.
 - **Leader Lifecycle Hooks**: Cluster-wide `on_cluster_leader_change` and local node `on_leader_change` callbacks to coordinate async service startup and shutdown.
 - **Efficient Binary Serialization**: Optimized wire format using `bitcode` encoding for low serialization latency and minimal network footprint.
@@ -312,15 +312,17 @@ raft/
 
 ### Zenoh Network Integration
 
-- `ZenohSessionBuilder`: Fluent builder optimized for QUIC Plain and QUIC TLS session establishment:
-  - `quic_plain(endpoint, is_listener)`: Configures QUIC Plain endpoint (automatically generating self-signed certificates to fulfill QUIC encryption requirements).
-  - `quic_tls(endpoint, is_listener, tls)`: Configures QUIC TLS endpoint with specific credentials.
+- `ZenohSessionBuilder`: Fluent builder optimized for QUIC Plain, TCP, and QUIC TLS session establishment:
+  - `quic_plain(endpoint, is_listener)`: Configures native certificate-free QUIC Plain endpoint (based on UDP + `rel=1` reliable stream + `multistream=1` multiplexing, zero certificates and zero keys required).
+  - `udp_reliable(endpoint, is_listener)`: Compatibility alias for `quic_plain`.
+  - `tcp(endpoint, is_listener)`: Configures plain TCP endpoint (no TLS handshake overhead).
+  - `quic_tls(endpoint, is_listener, tls)`: Configures QUIC TLS endpoint with user-specified credentials.
+  - `udp(endpoint, is_listener)`: Adds plain best-effort (unreliable) UDP endpoint.
+  - `endpoint(endpoint, is_listener)`: Adds general Locator endpoint.
   - `tls(tls_config)`: Configures TLS certificate parameters.
-  - `quic_endpoint(endpoint, is_listener)`: Configures custom QUIC endpoint.
   - `build_config()`: Builds `zenoh::Config`.
   - `open()`: Asynchronously creates and opens the `zenoh::Session`.
-- `ZenohTlsConfig`: TLS certificate configuration:
-  - `self_signed()`: Generates self-signed certificate pair for testing and private networks.
+- `ZenohTlsConfig`: TLS certificate configuration (only used on-demand when `quic_tls` is enabled):
   - `from_pem(cert, key, root_ca, verify_name)`: Loads credentials from PEM strings.
   - `new(cert_b64, key_b64, root_ca_b64, verify_name)`: Loads credentials from Base64 strings.
 - `ZenohNetworkConfig`: Network configuration options (prefix `key_prefix`, timeout `default_timeout`, routing `query_target`).

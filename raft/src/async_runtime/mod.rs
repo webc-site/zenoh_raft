@@ -1,4 +1,5 @@
-//! Async runtime components for Zenoh Raft based on compio and crossfire.
+//! Async runtime components for Zenoh Raft based on compio and crossfire
+//! 基于 compio 和 crossfire 的 Zenoh Raft 异步运行时组件
 
 #[macro_use]
 pub mod task_local;
@@ -63,6 +64,7 @@ pub fn mpsc_channel<T: 'static>(buffer: usize) -> (MpscSender<T>, MpscReceiver<T
   (MpscSender::new(tx), MpscReceiver::new(rx))
 }
 
+/// Arc-wrapped MPSC sender supporting downgrade/upgrade
 /// Arc 包装的 MPSC 发送端，支持 downgrade/upgrade
 pub struct MpscSender<T: 'static> {
   tx: Arc<MpscTx<T>>,

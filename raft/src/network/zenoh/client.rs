@@ -1,3 +1,4 @@
+//! Raft client network implementation based on Zenoh
 //! 基于 Zenoh 的 Raft 客户端网络实现
 
 use std::{
@@ -35,6 +36,7 @@ use crate::{
 const TIMEOUT_TOLERANCE: Duration = Duration::from_millis(15);
 const ERR_ZENOH_QUERY: &str = "Zenoh query error";
 
+/// Precomputed and compiled Zenoh RPC route keys to avoid hot-path string formatting and heap allocations
 /// 预计算并编译的 Zenoh RPC 路由键，避免在热路径上进行字符串格式化、语法校验与堆内存分配
 #[derive(Clone, Debug)]
 pub struct ZenohRpcKeys {
@@ -46,6 +48,7 @@ pub struct ZenohRpcKeys {
 }
 
 impl ZenohRpcKeys {
+  /// Attempt to build precomputed Zenoh RPC route keys from key prefix and target node
   /// 尝试根据键前缀与目标节点构建预计算的 Zenoh RPC 路由键
   pub fn try_new(key_prefix: &str, target: &impl Display) -> Result<Self, AnyError> {
     let base_key = format!("{key_prefix}/{target}");
@@ -63,6 +66,7 @@ impl ZenohRpcKeys {
     })
   }
 
+  /// Build precomputed Zenoh RPC route keys from key prefix and target node
   /// 根据键前缀与目标节点构建预计算的 Zenoh RPC 路由键
   #[inline]
   pub fn new(key_prefix: &str, target: &impl Display) -> Self {
@@ -70,6 +74,7 @@ impl ZenohRpcKeys {
   }
 }
 
+/// Raft network factory based on Zenoh
 /// 基于 Zenoh 的 Raft 网络工厂
 #[derive(Clone)]
 pub struct ZenohNetworkFactory<C: RaftTypeConfig> {
@@ -79,6 +84,7 @@ pub struct ZenohNetworkFactory<C: RaftTypeConfig> {
 }
 
 impl<C: RaftTypeConfig> ZenohNetworkFactory<C> {
+  /// Create a new Zenoh network factory
   /// 创建新的 Zenoh 网络工厂
   pub fn new(session: Arc<zenoh::Session>, config: ZenohNetworkConfig) -> Self {
     Self {
@@ -88,11 +94,13 @@ impl<C: RaftTypeConfig> ZenohNetworkFactory<C> {
     }
   }
 
+  /// Get reference to the underlying Zenoh session
   /// 获取底层 Zenoh 会话引用
   pub fn session(&self) -> &Arc<zenoh::Session> {
     &self.session
   }
 
+  /// Get reference to the network configuration
   /// 获取网络配置引用
   pub fn config(&self) -> &ZenohNetworkConfig {
     &self.config
@@ -121,6 +129,7 @@ where
   }
 }
 
+/// Target node Raft network client based on Zenoh
 /// 基于 Zenoh 的目标节点 Raft 网络客户端
 pub struct ZenohNetwork<C: RaftTypeConfig> {
   target: C::NodeId,
@@ -174,8 +183,9 @@ impl<C: RaftTypeConfig> ZenohNetwork<C> {
     }
 
     let elapsed = start.elapsed();
-    // 严谨区分超时与不可达：如果通道在远小于超时时间前关闭，说明目标节点离线或未注册 Queryable，
-    // 应返回 Unreachable 从而触发 OpenRaft 的 Backoff（rank 100）机制，避免对离线节点高频空转重试。
+    // Rigorously differentiate timeout and unreachable: if channel closes well before timeout,
+    // target node is offline or queryable unregistered; return Unreachable to trigger backoff.
+    // 严谨区分超时与不可达：若通道在超时时间前关闭说明目标离线或未注册，返回 Unreachable 触发 Backoff。
     if elapsed + TIMEOUT_TOLERANCE >= timeout {
       Err(RPCError::Timeout(Timeout {
         action,

@@ -18,7 +18,7 @@ zenoh_raft 提供高吞吐、低延迟的分布式一致性保障。通过 Zenoh
 ## 特性介绍
 
 - **原生 Zenoh 传输**：将 Raft 核心 RPC（AppendEntries、RequestVote、InstallSnapshot、TransferLeader）直接映射至 Zenoh 键表达式查询，在边缘计算、跨网段及网状拓扑中实现零配置通信。
-- **QUIC 会话构造器**：内置 `ZenohSessionBuilder` 与 `ZenohTlsConfig`，支持自签名证书自动化配置（`quic_plain`）与自定义安全证书凭据（`quic_tls`），开箱即用。
+- **原生多传输会话构造器**：内置 `ZenohSessionBuilder`，支持基于 UDP 的 QUIC Plain 免证书可靠多路复用传输（`quic_plain`）、纯明文 TCP 传输（`tcp`）以及自定义 TLS 安全证书凭据的 QUIC TLS 传输（`quic_tls`），开箱即用。
 - **多维进度跟踪体系**：提供对日志刷盘（`FlushPoint`）、投票持久化、法定人数提交、快照构建及状态机应用的非阻塞监听（`watch_*_progress`）与异步等待（`wait_until_ge`）。
 - **领导者生命周期监听**：提供集群级 `on_cluster_leader_change` 与本地节点 `on_leader_change` 钩子，支持优雅的异步服务启动与停止。
 - **高效二进制编码**：采用 `bitcode` 高性能编解码器序列化传输载荷，大幅降低序列化开销与网络带宽占用。
@@ -312,15 +312,17 @@ raft/
 
 ### Zenoh 网络与会话模块
 
-- `ZenohSessionBuilder`：针对 QUIC Plain 与 QUIC TLS 优化的流式会话构造器：
-  - `quic_plain(endpoint, is_listener)`：配置 QUIC Plain 端点（自动生成自签名证书满足 QUIC 协议加密要求）。
-  - `quic_tls(endpoint, is_listener, tls)`：配置带指定证书凭据的 QUIC TLS 端点。
+- `ZenohSessionBuilder`：针对 QUIC Plain、TCP 与 QUIC TLS 优化的流式会话构造器：
+  - `quic_plain(endpoint, is_listener)`：配置原生免证书的 QUIC Plain 端点（基于 UDP + `rel=1` 可靠流 + `multistream=1` 多路复用，零证书、零密钥负担）。
+  - `udp_reliable(endpoint, is_listener)`：`quic_plain` 的兼容别名。
+  - `tcp(endpoint, is_listener)`：配置纯明文 TCP 端点（无 TLS 握手开销）。
+  - `quic_tls(endpoint, is_listener, tls)`：配置带用户指定证书凭据的 QUIC TLS 安全端点。
+  - `udp(endpoint, is_listener)`：添加普通尽力而为（Best-effort，不可靠）UDP 端点。
+  - `endpoint(endpoint, is_listener)`：添加通用 Locator 端点。
   - `tls(tls_config)`：设置 TLS 证书配置。
-  - `quic_endpoint(endpoint, is_listener)`：添加自定义 QUIC 端点。
   - `build_config()`：生成 `zenoh::Config`。
   - `open()`：异步打开并初始化 `zenoh::Session`。
-- `ZenohTlsConfig`：TLS 证书凭据配置：
-  - `self_signed()`：自动生成用于本地或内网测试的自签名证书。
+- `ZenohTlsConfig`：TLS 证书凭据配置（仅在启用 `quic_tls` 时按需使用）：
   - `from_pem(cert, key, root_ca, verify_name)`：从 PEM 字符串加载证书与私钥。
   - `new(cert_b64, key_b64, root_ca_b64, verify_name)`：从 Base64 编码加载证书配置。
 - `ZenohNetworkConfig`：Zenoh 网络参数配置（键前缀 `key_prefix`、超时时间 `default_timeout`、查询策略 `query_target`）。

@@ -1,3 +1,4 @@
+//! Zenoh transport layer RPC wire message definitions
 //! Zenoh 传输层 RPC 消息格式定义
 
 use std::io::Cursor;
@@ -16,17 +17,23 @@ use crate::{
   vote::RaftCommittedLeaderId,
 };
 
+/// AppendEntries RPC route suffix
 /// AppendEntries RPC 路由后缀
 pub const RPC_APPEND_ENTRIES: &str = "append_entries";
+/// Vote RPC route suffix
 /// Vote RPC 路由后缀
 pub const RPC_VOTE: &str = "vote";
+/// PreVote RPC route suffix
 /// PreVote RPC 路由后缀
 pub const RPC_PRE_VOTE: &str = "pre_vote";
+/// Snapshot RPC route suffix
 /// Snapshot RPC 路由后缀
 pub const RPC_SNAPSHOT: &str = "snapshot";
+/// TransferLeader RPC route suffix
 /// TransferLeader RPC 路由后缀
 pub const RPC_TRANSFER_LEADER: &str = "transfer_leader";
 
+/// AppendEntries RPC request wire format
 /// AppendEntries RPC 请求线格式
 #[derive(Encode, Decode)]
 pub struct WireAppendEntriesReq<V, L, E> {
@@ -64,6 +71,7 @@ impl<C: RaftTypeConfig> From<WireAppendEntriesReq<VoteOf<C>, LogIdOf<C>, EntryOf
   }
 }
 
+/// AppendEntries RPC response wire format
 /// AppendEntries RPC 响应线格式
 #[derive(Encode, Decode)]
 pub enum WireAppendEntriesResp<V, L> {
@@ -101,6 +109,7 @@ impl<C: RaftTypeConfig> From<WireAppendEntriesResp<VoteOf<C>, LogIdOf<C>>>
   }
 }
 
+/// Vote RPC request wire format
 /// Vote RPC 请求线格式
 #[derive(Encode, Decode)]
 pub struct WireVoteReq<V, L> {
@@ -150,6 +159,7 @@ impl<V, L> WireVoteReq<V, L> {
   }
 }
 
+/// Vote RPC response wire format
 /// Vote RPC 响应线格式
 #[derive(Encode, Decode)]
 pub struct WireVoteResp<V, L> {
@@ -180,6 +190,7 @@ impl<C: RaftTypeConfig> From<WireVoteResp<VoteOf<C>, LogIdOf<C>>> for VoteRespon
   }
 }
 
+/// Snapshot installation response wire format
 /// Snapshot 安装响应线格式
 #[derive(Encode, Decode)]
 pub struct WireSnapshotResp<V> {
@@ -200,6 +211,7 @@ impl<C: RaftTypeConfig> From<WireSnapshotResp<VoteOf<C>>> for SnapshotResponse<C
   }
 }
 
+/// Leader transfer request wire format
 /// Leader 转移请求线格式
 #[derive(Encode, Decode)]
 pub struct WireTransferLeaderReq<V, N, L> {
@@ -230,6 +242,7 @@ impl<C: RaftTypeConfig> From<WireTransferLeaderReq<VoteOf<C>, C::NodeId, LogIdOf
   }
 }
 
+/// Leader transfer error response wire format
 /// Leader 转移错误响应线格式
 #[derive(Encode, Decode)]
 pub enum WireTransferLeaderErr<V, L> {
@@ -275,6 +288,7 @@ impl<C: RaftTypeConfig> From<WireTransferLeaderErr<VoteOf<C>, LogIdOf<C>>>
   }
 }
 
+/// Snapshot installation payload wire format
 /// 快照安装请求负载线格式
 #[derive(Encode, Decode)]
 pub struct WireSnapshotPayload<V, M> {
@@ -283,7 +297,8 @@ pub struct WireSnapshotPayload<V, M> {
   pub data: Vec<u8>,
 }
 
-/// 基于内存 Cursor 的快照线类型别名
+/// Wire snapshot type alias based on in-memory Cursor
+/// 基于内存 Cursor 的快照网络传输类型别名
 pub type WireSnapshot<CLID, NID, N> = Snapshot<CLID, NID, N, Cursor<Vec<u8>>>;
 
 impl<V, M> WireSnapshotPayload<V, M> {

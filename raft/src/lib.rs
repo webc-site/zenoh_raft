@@ -10,12 +10,14 @@ fn _log_init() {
 
 macro_rules! func_name {
   () => {{
+    // Internal helper function to obtain type name containing function name at compile time
     // 内部辅助函数，用于在编译期获取包含函数名的类型名
     fn f() {}
     fn type_name_of<T>(_: T) -> &'static str {
       std::any::type_name::<T>()
     }
     let name = type_name_of(f);
+    // Return &'static str to avoid runtime allocation
     // 返回 &'static str 避免运行时分配
     name.strip_suffix("::f").unwrap_or(name)
   }};
@@ -98,10 +100,12 @@ pub use crate::{
   vote::Vote,
 };
 
+/// Application data payload trait
 /// 应用层数据 Trait
 pub trait AppData: OptionalFeatures + fmt::Debug + fmt::Display + 'static {}
 impl<T> AppData for T where T: OptionalFeatures + fmt::Debug + fmt::Display + 'static {}
 
+/// Application response data payload trait
 /// 应用层响应数据 Trait
 pub trait AppDataResponse: OptionalFeatures + 'static {}
 impl<T> AppDataResponse for T where T: OptionalFeatures + 'static {}
