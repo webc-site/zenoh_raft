@@ -1,30 +1,29 @@
-use std::time::Duration;
+use std::{
+  cmp::{max, min},
+  time::Duration,
+};
 
 use display_more::DisplayOptionExt;
 use futures_util::FutureExt;
 
-use crate::LogIdOptionExt;
-use crate::RaftLogReader;
-use crate::RaftTypeConfig;
-use crate::StorageError;
-use crate::entry::RaftEntry;
-use crate::entry::raft_entry_ext::RaftEntryExt;
-use crate::errors::ReplicationClosed;
-use crate::errors::StorageIOResult;
-use crate::log_id_range::LogIdRange;
-use crate::progress::inflight_id::InflightId;
-use crate::raft::AppendEntriesRequest;
-use crate::raft_state::IOId;
-use crate::replication::backoff_consumer::BackoffConsumer;
-use crate::replication::event_watcher::EventWatcher;
-use crate::replication::payload::Payload;
-use crate::replication::replication_context::ReplicationContext;
-use crate::storage::RaftLogStorage;
-use crate::type_config::TypeConfigExt;
-use crate::type_config::alias::EntryOf;
-use crate::type_config::alias::LogIdOf;
-use std::cmp::max;
-use std::cmp::min;
+use crate::{
+  LogIdOptionExt, RaftLogReader, RaftTypeConfig, StorageError,
+  entry::{RaftEntry, raft_entry_ext::RaftEntryExt},
+  errors::{ReplicationClosed, StorageIOResult},
+  log_id_range::LogIdRange,
+  progress::inflight_id::InflightId,
+  raft::AppendEntriesRequest,
+  raft_state::IOId,
+  replication::{
+    backoff_consumer::BackoffConsumer, event_watcher::EventWatcher, payload::Payload,
+    replication_context::ReplicationContext,
+  },
+  storage::RaftLogStorage,
+  type_config::{
+    TypeConfigExt,
+    alias::{EntryOf, LogIdOf},
+  },
+};
 
 /// Mutable state for generating AppendEntries requests in a replication stream.
 ///
@@ -33,305 +32,304 @@ use std::cmp::min;
 /// replication task that updates `log_id_range` when new entries arrive.
 pub(crate) struct StreamState<C, LS>
 where
-    C: RaftTypeConfig,
-    LS: RaftLogStorage<C>,
+  C: RaftTypeConfig,
+  LS: RaftLogStorage<C>,
 {
-    pub(crate) replication_context: ReplicationContext<C>,
+  pub(crate) replication_context: ReplicationContext<C>,
 
-    pub(crate) event_watcher: EventWatcher<C>,
+  pub(crate) event_watcher: EventWatcher<C>,
 
-    /// The [`RaftLogStorage::LogReader`] interface.
-    pub(crate) log_reader: LS::LogReader,
+  /// The [`RaftLogStorage::LogReader`] interface.
+  pub(crate) log_reader: LS::LogReader,
 
-    /// The range of log entries to replicate: `(prev_log_id, last_log_id]`.
-    ///
-    /// Set to `None` when all entries have been sent.
-    pub(crate) payload: Option<Payload<C>>,
+  /// The range of log entries to replicate: `(prev_log_id, last_log_id]`.
+  ///
+  /// Set to `None` when all entries have been sent.
+  pub(crate) payload: Option<Payload<C>>,
 
-    pub(crate) inflight_id: Option<InflightId>,
+  pub(crate) inflight_id: Option<InflightId>,
 
-    /// Read-only handle to the shared backoff state, sampled before each request.
-    ///
-    /// The consumer can only query the next delay; only `ReplicationCore` (via its
-    /// owned `BackoffState`) enables or clears the backoff.
-    pub(crate) backoff_consumer: BackoffConsumer,
+  /// Read-only handle to the shared backoff state, sampled before each request.
+  ///
+  /// The consumer can only query the next delay; only `ReplicationCore` (via its
+  /// owned `BackoffState`) enables or clears the backoff.
+  pub(crate) backoff_consumer: BackoffConsumer,
 }
 
 impl<C, LS> StreamState<C, LS>
 where
-    C: RaftTypeConfig,
-    LS: RaftLogStorage<C>,
+  C: RaftTypeConfig,
+  LS: RaftLogStorage<C>,
 {
-    /// Generates the next AppendEntries request from the current log range.
-    ///
-    /// Returns `Ok(None)` when there are no more entries to send.
-    /// After each call, `log_id_range` is updated to exclude the sent entries.
-    pub(crate) async fn next_request(
-        &mut self,
-    ) -> Result<Option<AppendEntriesRequest<C>>, ReplicationClosed> {
-        // An empty range still sends one RPC and is then cleared by `update_log_id_range()`.
-        let Some(log_id_range) = self.get_log_id_range().await else {
-            return Ok(None);
-        };
+  /// Generates the next AppendEntries request from the current log range.
+  ///
+  /// Returns `Ok(None)` when there are no more entries to send.
+  /// After each call, `log_id_range` is updated to exclude the sent entries.
+  pub(crate) async fn next_request(
+    &mut self,
+  ) -> Result<Option<AppendEntriesRequest<C>>, ReplicationClosed> {
+    // An empty range still sends one RPC and is then cleared by `update_log_id_range()`.
+    let Some(log_id_range) = self.get_log_id_range().await else {
+      return Ok(None);
+    };
 
-        log::debug!("{}: log_id_range: {}", func_name!(), log_id_range);
+    log::debug!("{}: log_id_range: {}", func_name!(), log_id_range);
 
-        let res = self.read_log_entries(log_id_range).await;
-        let (entries, sending_range) = match res {
-            Ok(x) => x,
-            Err(sto_err) => {
-                log::error!(
-                    "{} replication to target={}",
-                    sto_err,
-                    self.replication_context.target
-                );
+    let res = self.read_log_entries(log_id_range).await;
+    let (entries, sending_range) = match res {
+      Ok(x) => x,
+      Err(sto_err) => {
+        log::error!(
+          "{} replication to target={}",
+          sto_err,
+          self.replication_context.target
+        );
 
-                self.replication_context.notify_storage_error(sto_err).await;
-                return Err(ReplicationClosed::new("storage error"));
-            }
-        };
+        self.replication_context.notify_storage_error(sto_err).await;
+        return Err(ReplicationClosed::new("storage error"));
+      }
+    };
 
-        let accepted_io: IOId<C> = self.event_watcher.io_accepted_rx.borrow_watched().clone();
-        if self.replication_context.leader_changed(&accepted_io) {
-            return Ok(None);
-        }
-
-        self.update_log_id_range(sending_range.last);
-
-        let payload: AppendEntriesRequest<C> = AppendEntriesRequest {
-            vote: self.replication_context.leader_vote.clone().into_vote(),
-            prev_log_id: sending_range.prev.clone(),
-            // Marking the commit as seen keeps the pending `committed_rx.changed()` from forcing a
-            // second, entry-less request that carries this same commit. A commit that advances
-            // after this read stays unseen and gets a request of its own.
-            leader_commit: self.event_watcher.committed_rx.borrow_and_update().clone(),
-            entries,
-        };
-
-        if let Some(first) = payload.entries.first() {
-            debug_assert_eq!(
-                payload.prev_log_id.next_index(),
-                first.index(),
-                "expect AppendEntries prev_log_id({}) to be immediately before the first entry at index {}",
-                payload.prev_log_id.display(),
-                first.index()
-            );
-        }
-
-        log::debug!("next_request: AppendEntries: {}", payload);
-
-        self.backoff_if_enabled().await;
-
-        Ok(Some(payload))
+    let accepted_io: IOId<C> = self.event_watcher.io_accepted_rx.borrow_watched().clone();
+    if self.replication_context.leader_changed(&accepted_io) {
+      return Ok(None);
     }
 
-    /// Return None if no more data to send.
-    async fn get_log_id_range(&mut self) -> Option<LogIdRange<C>> {
-        let payload = self.payload.as_ref()?;
+    self.update_log_id_range(sending_range.last);
 
-        log::debug!("pipeline stream payload: {}", payload);
+    let payload: AppendEntriesRequest<C> = AppendEntriesRequest {
+      vote: self.replication_context.leader_vote.clone().into_vote(),
+      prev_log_id: sending_range.prev.clone(),
+      // Marking the commit as seen keeps the pending `committed_rx.changed()` from forcing a
+      // second, entry-less request that carries this same commit. A commit that advances
+      // after this read stays unseen and gets a request of its own.
+      leader_commit: self.event_watcher.committed_rx.borrow_and_update().clone(),
+      entries,
+    };
 
-        let prev = match payload {
-            Payload::LogIdRange { log_id_range } => return Some(log_id_range.clone()),
-            Payload::LogsSince { prev } => prev.clone(),
-        };
-
-        // pipeline mode:
-
-        loop {
-            let current: IOId<C> = self.event_watcher.io_submitted_rx.borrow_watched().clone();
-            let last_log_id = current.last_log_id().cloned();
-
-            log::debug!(
-                "building next entries range to replicate: current last_log_id: {}",
-                last_log_id.display()
-            );
-
-            if last_log_id > prev {
-                return Some(non_reversed_log_id_range(prev, last_log_id));
-            } else {
-                let data_change = self.event_watcher.replicate_rx.changed();
-                let io_change = self.event_watcher.io_submitted_rx.changed();
-                let committed_change = self.event_watcher.committed_rx.changed();
-                let cancel = self.replication_context.cancel_rx.changed();
-
-                futures_util::select! {
-                    _data_changed = data_change.fuse() => {
-                        let new_data = self.event_watcher.replicate_rx.borrow_watched().clone();
-                        if Some(new_data.inflight_id) != self.inflight_id {
-                            log::info!("current inflight_id: {} received payload with new inflight_id: {}, quit", self.inflight_id.display(), new_data.inflight_id);
-                            return None;
-                        }
-                    }
-                    _io_changed = io_change.fuse() => {
-                        log::debug!("io_submitted_rx changed");
-                        // Continue
-                    }
-                    _committed_change = committed_change.fuse() => {
-                        log::debug!("committed_rx changed");
-                        // Only a commit that no request has carried is still unseen here, because
-                        // `next_request()` marks every commit it sends. With no new logs to
-                        // piggyback on, an entry-less request is the only way to deliver it.
-                        return Some(non_reversed_log_id_range(prev, last_log_id));
-                    }
-                    cancel_res = cancel.fuse() => {
-                        log::info!("Replication Stream is canceled, res: {:?}, when:(get_log_id_range:wait-for-changed)", cancel_res);
-                        return None;
-                    }
-                }
-            }
-        }
+    if let Some(first) = payload.entries.first() {
+      debug_assert_eq!(
+        payload.prev_log_id.next_index(),
+        first.index(),
+        "expect AppendEntries prev_log_id({}) to be immediately before the first entry at index {}",
+        payload.prev_log_id.display(),
+        first.index()
+      );
     }
 
-    /// Waits for the backoff duration if backoff is enabled, or returns immediately.
-    async fn backoff_if_enabled(&mut self) {
-        let Some(sleep_duration) = self.backoff_consumer.next_delay() else {
-            return;
-        };
+    log::debug!("next_request: AppendEntries: {}", payload);
 
-        let sleep = C::sleep(sleep_duration);
+    self.backoff_if_enabled().await;
+
+    Ok(Some(payload))
+  }
+
+  /// Return None if no more data to send.
+  async fn get_log_id_range(&mut self) -> Option<LogIdRange<C>> {
+    let payload = self.payload.as_ref()?;
+
+    log::debug!("pipeline stream payload: {}", payload);
+
+    let prev = match payload {
+      Payload::LogIdRange { log_id_range } => return Some(log_id_range.clone()),
+      Payload::LogsSince { prev } => prev.clone(),
+    };
+
+    // pipeline mode:
+
+    loop {
+      let current: IOId<C> = self.event_watcher.io_submitted_rx.borrow_watched().clone();
+      let last_log_id = current.last_log_id().cloned();
+
+      log::debug!(
+        "building next entries range to replicate: current last_log_id: {}",
+        last_log_id.display()
+      );
+
+      if last_log_id > prev {
+        return Some(non_reversed_log_id_range(prev, last_log_id));
+      } else {
+        let data_change = self.event_watcher.replicate_rx.changed();
+        let io_change = self.event_watcher.io_submitted_rx.changed();
+        let committed_change = self.event_watcher.committed_rx.changed();
         let cancel = self.replication_context.cancel_rx.changed();
 
-        log::debug!("backoff timeout: {:?}", sleep_duration);
-
         futures_util::select! {
-            _ = sleep.fuse() => {
-                log::debug!("backoff timeout");
+            _data_changed = data_change.fuse() => {
+                let new_data = self.event_watcher.replicate_rx.borrow_watched().clone();
+                if Some(new_data.inflight_id) != self.inflight_id {
+                    log::info!("current inflight_id: {} received payload with new inflight_id: {}, quit", self.inflight_id.display(), new_data.inflight_id);
+                    return None;
+                }
+            }
+            _io_changed = io_change.fuse() => {
+                log::debug!("io_submitted_rx changed");
+                // Continue
+            }
+            _committed_change = committed_change.fuse() => {
+                log::debug!("committed_rx changed");
+                // Only a commit that no request has carried is still unseen here, because
+                // `next_request()` marks every commit it sends. With no new logs to
+                // piggyback on, an entry-less request is the only way to deliver it.
+                return Some(non_reversed_log_id_range(prev, last_log_id));
             }
             cancel_res = cancel.fuse() => {
-                log::info!("Replication Stream is canceled, res: {:?}, when:(backoff_if_enabled:wait-for-changed)", cancel_res);
+                log::info!("Replication Stream is canceled, res: {:?}, when:(get_log_id_range:wait-for-changed)", cancel_res);
+                return None;
             }
         }
+      }
     }
+  }
 
-    /// Updates `log_id_range` after sending entries up to `matching`.
-    ///
-    /// Sets `log_id_range` to `None` when all entries have been sent.
-    fn update_log_id_range(&mut self, matching: Option<LogIdOf<C>>) {
-        let Some(payload) = self.payload.as_mut() else {
-            return;
-        };
+  /// Waits for the backoff duration if backoff is enabled, or returns immediately.
+  async fn backoff_if_enabled(&mut self) {
+    let Some(sleep_duration) = self.backoff_consumer.next_delay() else {
+      return;
+    };
 
-        payload.update_matching(matching);
+    let sleep = C::sleep(sleep_duration);
+    let cancel = self.replication_context.cancel_rx.changed();
 
-        if payload.len() == Some(0) {
-            self.payload = None;
+    log::debug!("backoff timeout: {:?}", sleep_duration);
+
+    futures_util::select! {
+        _ = sleep.fuse() => {
+            log::debug!("backoff timeout");
+        }
+        cancel_res = cancel.fuse() => {
+            log::info!("Replication Stream is canceled, res: {:?}, when:(backoff_if_enabled:wait-for-changed)", cancel_res);
         }
     }
+  }
 
-    /// Reads log entries from storage for the given range.
-    ///
-    /// Returns the entries and the actual range covered (may be smaller than requested
-    /// due to `limited_get_log_entries`).
-    async fn read_log_entries(
-        &mut self,
-        log_id_range: LogIdRange<C>,
-    ) -> Result<(Vec<EntryOf<C>>, LogIdRange<C>), StorageError<C>> {
-        log::debug!("read_log_entries: log_id_range: {}", log_id_range);
+  /// Updates `log_id_range` after sending entries up to `matching`.
+  ///
+  /// Sets `log_id_range` to `None` when all entries have been sent.
+  fn update_log_id_range(&mut self, matching: Option<LogIdOf<C>>) {
+    let Some(payload) = self.payload.as_mut() else {
+      return;
+    };
 
-        // Series of logs to send, and the last log id to send
-        let rng = &log_id_range;
+    payload.update_matching(matching);
 
-        // The log index start and end to send.
-        let (start, end) = {
-            let start = rng.prev.next_index();
-            let end = rng.last.next_index();
+    if payload.len() == Some(0) {
+      self.payload = None;
+    }
+  }
 
-            (start, end)
-        };
+  /// Reads log entries from storage for the given range.
+  ///
+  /// Returns the entries and the actual range covered (may be smaller than requested
+  /// due to `limited_get_log_entries`).
+  async fn read_log_entries(
+    &mut self,
+    log_id_range: LogIdRange<C>,
+  ) -> Result<(Vec<EntryOf<C>>, LogIdRange<C>), StorageError<C>> {
+    log::debug!("read_log_entries: log_id_range: {}", log_id_range);
 
-        if start >= end {
-            debug_assert_eq!(
-                start, end,
-                "read_log_entries received reversed range: start({}) > end({}), log_id_range: {}",
-                start, end, log_id_range
-            );
-            // Heartbeat RPC, no logs to send, last log id is the same as prev_log_id
-            let r = LogIdRange::new(rng.prev.clone(), rng.prev.clone());
-            Ok((vec![], r))
-        } else {
-            let max_entries = self.replication_context.config.max_payload_entries;
-            let end = min(end, start + max_entries);
+    // Series of logs to send, and the last log id to send
+    let rng = &log_id_range;
 
-            // limited_get_log_entries will return logs smaller than the range [start, end).
-            let logs = self
-                .log_reader
-                .limited_get_log_entries(start, end)
-                .await
-                .sto_read_logs()?;
+    // The log index start and end to send.
+    let (start, end) = {
+      let start = rng.prev.next_index();
+      let end = rng.last.next_index();
 
-            // Handle empty result gracefully: treat as heartbeat.
-            // This violates the API contract but we don't panic.
-            // We sleep briefly to avoid a tight loop since the log_id_range won't advance.
-            if logs.is_empty() {
-                let sleep_duration = Duration::from_millis(10);
-                log::warn!(
-                    "limited_get_log_entries({}, {}) returned empty; \
+      (start, end)
+    };
+
+    if start >= end {
+      debug_assert_eq!(
+        start, end,
+        "read_log_entries received reversed range: start({}) > end({}), log_id_range: {}",
+        start, end, log_id_range
+      );
+      // Heartbeat RPC, no logs to send, last log id is the same as prev_log_id
+      let r = LogIdRange::new(rng.prev.clone(), rng.prev.clone());
+      Ok((vec![], r))
+    } else {
+      let max_entries = self.replication_context.config.max_payload_entries;
+      let end = min(end, start + max_entries);
+
+      // limited_get_log_entries will return logs smaller than the range [start, end).
+      let logs = self
+        .log_reader
+        .limited_get_log_entries(start, end)
+        .await
+        .sto_read_logs()?;
+
+      // Handle empty result gracefully: treat as heartbeat.
+      // This violates the API contract but we don't panic.
+      // We sleep briefly to avoid a tight loop since the log_id_range won't advance.
+      if logs.is_empty() {
+        let sleep_duration = Duration::from_millis(10);
+        log::warn!(
+          "limited_get_log_entries({}, {}) returned empty; \
                      this violates the API contract but is handled gracefully as a heartbeat. \
                      Sleeping {:?} to avoid tight loop.",
-                    start,
-                    end,
-                    sleep_duration
-                );
-                C::sleep(sleep_duration).await;
-                let r = LogIdRange::new(rng.prev.clone(), rng.prev.clone());
-                return Ok((vec![], r));
-            }
+          start,
+          end,
+          sleep_duration
+        );
+        C::sleep(sleep_duration).await;
+        let r = LogIdRange::new(rng.prev.clone(), rng.prev.clone());
+        return Ok((vec![], r));
+      }
 
-            let first = logs.first().map(|ent| ent.ref_log_id()).unwrap();
-            let last = logs.last().map(|ent| ent.log_id()).unwrap();
+      let first = logs.first().map(|ent| ent.ref_log_id()).unwrap();
+      let last = logs.last().map(|ent| ent.log_id()).unwrap();
 
-            debug_assert!(
-                logs.len() <= (end - start) as usize,
-                "expect logs ⊆ [{}..{}) but got {} entries, first: {}, last: {}",
-                start,
-                end,
-                logs.len(),
-                first,
-                last
-            );
+      debug_assert!(
+        logs.len() <= (end - start) as usize,
+        "expect logs ⊆ [{}..{}) but got {} entries, first: {}, last: {}",
+        start,
+        end,
+        logs.len(),
+        first,
+        last
+      );
 
-            let r = LogIdRange::new(rng.prev.clone(), Some(last));
-            Ok((logs, r))
-        }
+      let r = LogIdRange::new(rng.prev.clone(), Some(last));
+      Ok((logs, r))
     }
+  }
 }
 
 fn non_reversed_log_id_range<C>(prev: Option<LogIdOf<C>>, last: Option<LogIdOf<C>>) -> LogIdRange<C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    // `prev` is delivered through ReplicationCore's replication command channel, while `last` is
-    // observed through the io_submitted watch channel. The watch channel may not have caught up yet.
-    let last = max(last, prev.clone());
-    LogIdRange::new(prev, last)
+  // `prev` is delivered through ReplicationCore's replication command channel, while `last` is
+  // observed through the io_submitted watch channel. The watch channel may not have caught up yet.
+  let last = max(last, prev.clone());
+  LogIdRange::new(prev, last)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::non_reversed_log_id_range;
-    use crate::engine::testing::UTConfig;
-    use crate::engine::testing::log_id;
+  use super::non_reversed_log_id_range;
+  use crate::engine::testing::{UTConfig, log_id};
 
-    #[test]
-    fn test_non_reversed_log_id_range() {
-        let prev = Some(log_id(1, 1, 10));
-        let stale_last = Some(log_id(1, 1, 9));
+  #[test]
+  fn test_non_reversed_log_id_range() {
+    let prev = Some(log_id(1, 1, 10));
+    let stale_last = Some(log_id(1, 1, 9));
 
-        let got = non_reversed_log_id_range::<UTConfig>(prev, stale_last);
+    let got = non_reversed_log_id_range::<UTConfig>(prev, stale_last);
 
-        assert_eq!(got.prev, prev);
-        assert_eq!(got.last, got.prev);
-    }
+    assert_eq!(got.prev, prev);
+    assert_eq!(got.last, got.prev);
+  }
 
-    #[test]
-    fn test_non_reversed_log_id_range_keeps_larger_last() {
-        let prev = Some(log_id(1, 1, 10));
-        let last = Some(log_id(1, 1, 12));
+  #[test]
+  fn test_non_reversed_log_id_range_keeps_larger_last() {
+    let prev = Some(log_id(1, 1, 10));
+    let last = Some(log_id(1, 1, 12));
 
-        let got = non_reversed_log_id_range::<UTConfig>(prev, last);
+    let got = non_reversed_log_id_range::<UTConfig>(prev, last);
 
-        assert_eq!(got.prev, prev);
-        assert_eq!(got.last, last);
-    }
+    assert_eq!(got.prev, prev);
+    assert_eq!(got.last, last);
+  }
 }

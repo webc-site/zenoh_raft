@@ -1,13 +1,9 @@
-use std::error::Error;
-use std::fmt;
-use std::fmt::Display;
+use std::{error::Error, fmt, fmt::Display};
 
 use display_more::DisplayOptionExt;
 use validit::Validate;
 
-use crate::LogIdOptionExt;
-use crate::RaftTypeConfig;
-use crate::type_config::alias::LogIdOf;
+use crate::{LogIdOptionExt, RaftTypeConfig, type_config::alias::LogIdOf};
 
 // TODO: I need just a range, but not a log id range.
 
@@ -17,87 +13,89 @@ use crate::type_config::alias::LogIdOf;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LogIdRange<C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    /// The prev log id before the first to send, exclusive.
-    pub(crate) prev: Option<LogIdOf<C>>,
+  /// The prev log id before the first to send, exclusive.
+  pub(crate) prev: Option<LogIdOf<C>>,
 
-    /// The last log id to send, inclusive.
-    pub(crate) last: Option<LogIdOf<C>>,
+  /// The last log id to send, inclusive.
+  pub(crate) last: Option<LogIdOf<C>>,
 }
 
 impl<C> Copy for LogIdRange<C>
 where
-    C: RaftTypeConfig,
-    LogIdOf<C>: Copy,
+  C: RaftTypeConfig,
+  LogIdOf<C>: Copy,
 {
 }
 
 impl<C> Display for LogIdRange<C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "({}, {}]", self.prev.display(), self.last.display())
-    }
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(f, "({}, {}]", self.prev.display(), self.last.display())
+  }
 }
 
 impl<C> Validate for LogIdRange<C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    fn validate(&self) -> Result<(), Box<dyn Error>> {
-        validit::less_equal!(&self.prev, &self.last);
-        Ok(())
-    }
+  fn validate(&self) -> Result<(), Box<dyn Error>> {
+    validit::less_equal!(&self.prev, &self.last);
+    Ok(())
+  }
 }
 
 impl<C> LogIdRange<C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    pub(crate) fn new(prev: Option<LogIdOf<C>>, last: Option<LogIdOf<C>>) -> Self {
-        Self { prev, last }
-    }
+  pub(crate) fn new(prev: Option<LogIdOf<C>>, last: Option<LogIdOf<C>>) -> Self {
+    Self { prev, last }
+  }
 
-    pub(crate) fn len(&self) -> u64 {
-        self.last.next_index() - self.prev.next_index()
-    }
+  pub(crate) fn len(&self) -> u64 {
+    self.last.next_index() - self.prev.next_index()
+  }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::engine::testing::log_id as testing_log_id;
-    use std::panic::catch_unwind;
-    use validit::Valid;
+  use std::panic::catch_unwind;
 
-    use crate::engine::testing::UTConfig;
-    use crate::log_id_range::LogIdRange;
-    use crate::type_config::alias::LogIdOf;
+  use validit::Valid;
 
-    fn log_id(index: u64) -> LogIdOf<UTConfig> {
-        testing_log_id(1, 1, index)
-    }
+  use crate::{
+    engine::testing::{UTConfig, log_id as testing_log_id},
+    log_id_range::LogIdRange,
+    type_config::alias::LogIdOf,
+  };
 
-    #[test]
-    fn test_log_id_range_validate() -> anyhow::Result<()> {
-        let res = catch_unwind(|| {
-            let r = Valid::new(LogIdRange::<UTConfig>::new(Some(log_id(5)), None));
-            let _ = &r.last;
-        });
-        log::info!("res: {:?}", res);
-        assert!(res.is_err(), "prev(5) > last(None)");
+  fn log_id(index: u64) -> LogIdOf<UTConfig> {
+    testing_log_id(1, 1, index)
+  }
 
-        let res = catch_unwind(|| {
-            let r = Valid::new(LogIdRange::<UTConfig>::new(
-                Some(log_id(5)),
-                Some(log_id(4)),
-            ));
-            let _ = &r.last;
-        });
-        log::info!("res: {:?}", res);
-        assert!(res.is_err(), "prev(5) > last(4)");
+  #[test]
+  fn test_log_id_range_validate() -> anyhow::Result<()> {
+    let res = catch_unwind(|| {
+      let r = Valid::new(LogIdRange::<UTConfig>::new(Some(log_id(5)), None));
+      let _ = &r.last;
+    });
+    log::info!("res: {:?}", res);
+    assert!(res.is_err(), "prev(5) > last(None)");
 
-        Ok(())
-    }
+    let res = catch_unwind(|| {
+      let r = Valid::new(LogIdRange::<UTConfig>::new(
+        Some(log_id(5)),
+        Some(log_id(4)),
+      ));
+      let _ = &r.last;
+    });
+    log::info!("res: {:?}", res);
+    assert!(res.is_err(), "prev(5) > last(4)");
+
+    Ok(())
+  }
 }

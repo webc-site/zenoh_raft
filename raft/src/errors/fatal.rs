@@ -1,5 +1,4 @@
-use crate::RaftTypeConfig;
-use crate::StorageError;
+use crate::{RaftTypeConfig, StorageError};
 
 /// Unrecoverable error that causes Raft to shut down.
 ///
@@ -16,17 +15,17 @@ use crate::StorageError;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Fatal<C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    /// Storage error that caused the Raft node to stop.
-    #[error(transparent)]
-    StorageError(#[from] StorageError<C>),
+  /// Storage error that caused the Raft node to stop.
+  #[error(transparent)]
+  StorageError(#[from] StorageError<C>),
 
-    /// Raft node panicked and stopped.
-    #[error("panicked")]
-    Panicked,
+  /// Raft node panicked and stopped.
+  #[error("panicked")]
+  Panicked,
 
-    /// Raft stopped normally.
-    #[error("raft stopped")]
-    Stopped,
+  /// Raft stopped normally.
+  #[error("raft stopped")]
+  Stopped,
 }

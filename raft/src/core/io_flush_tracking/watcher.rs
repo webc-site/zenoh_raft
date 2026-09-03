@@ -1,15 +1,15 @@
 use super::FlushPoint;
-use crate::RaftTypeConfig;
-use crate::Vote;
-use crate::core::io_flush_tracking::AppliedProgress;
-use crate::core::io_flush_tracking::CommitProgress;
-use crate::core::io_flush_tracking::LogProgress;
-use crate::core::io_flush_tracking::SnapshotProgress;
-use crate::core::io_flush_tracking::VoteProgress;
-use crate::core::io_flush_tracking::sender::IoProgressSender;
-use crate::type_config::TypeConfigExt;
-use crate::type_config::alias::LogIdOf;
-use crate::type_config::alias::WatchReceiverOf;
+use crate::{
+  RaftTypeConfig, Vote,
+  core::io_flush_tracking::{
+    AppliedProgress, CommitProgress, LogProgress, SnapshotProgress, VoteProgress,
+    sender::IoProgressSender,
+  },
+  type_config::{
+    TypeConfigExt,
+    alias::{LogIdOf, WatchReceiverOf},
+  },
+};
 
 /// I/O flush progress watch handles.
 ///
@@ -35,95 +35,95 @@ use crate::type_config::alias::WatchReceiverOf;
 /// - Use vote progress to wait for leadership changes to be persisted
 pub(crate) struct IoProgressWatcher<C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    /// Receiver for log I/O progress (vote + log appends).
-    log: WatchReceiverOf<C, Option<FlushPoint<C>>>,
+  /// Receiver for log I/O progress (vote + log appends).
+  log: WatchReceiverOf<C, Option<FlushPoint<C>>>,
 
-    /// Receiver for vote I/O progress (vote saves only, or implied by log appends).
-    vote: WatchReceiverOf<C, Option<Vote<C::LeaderId>>>,
+  /// Receiver for vote I/O progress (vote saves only, or implied by log appends).
+  vote: WatchReceiverOf<C, Option<Vote<C::LeaderId>>>,
 
-    /// Receiver for commit log progress (state machine submission).
-    commit: WatchReceiverOf<C, Option<LogIdOf<C>>>,
+  /// Receiver for commit log progress (state machine submission).
+  commit: WatchReceiverOf<C, Option<LogIdOf<C>>>,
 
-    /// Receiver for snapshot persistence progress.
-    snapshot: WatchReceiverOf<C, Option<LogIdOf<C>>>,
+  /// Receiver for snapshot persistence progress.
+  snapshot: WatchReceiverOf<C, Option<LogIdOf<C>>>,
 
-    /// Receiver for applied log progress (state machine application).
-    apply: WatchReceiverOf<C, Option<LogIdOf<C>>>,
+  /// Receiver for applied log progress (state machine application).
+  apply: WatchReceiverOf<C, Option<LogIdOf<C>>>,
 }
 
 impl<C> IoProgressWatcher<C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    /// Create a new progress watcher/sender pair.
-    ///
-    /// Returns `(IoProgressSender, IoProgressWatcher)` where:
-    /// - The sender is used by RaftCore to publish flush notifications
-    /// - The watcher is used to create watch handles for applications
-    pub(crate) fn new() -> (IoProgressSender<C>, Self) {
-        let (log_tx, log) = C::watch_channel(None);
-        let (vote_tx, vote) = C::watch_channel(None);
-        let (commit_tx, commit) = C::watch_channel(None);
-        let (snapshot_tx, snapshot) = C::watch_channel(None);
-        let (apply_tx, apply) = C::watch_channel(None);
+  /// Create a new progress watcher/sender pair.
+  ///
+  /// Returns `(IoProgressSender, IoProgressWatcher)` where:
+  /// - The sender is used by RaftCore to publish flush notifications
+  /// - The watcher is used to create watch handles for applications
+  pub(crate) fn new() -> (IoProgressSender<C>, Self) {
+    let (log_tx, log) = C::watch_channel(None);
+    let (vote_tx, vote) = C::watch_channel(None);
+    let (commit_tx, commit) = C::watch_channel(None);
+    let (snapshot_tx, snapshot) = C::watch_channel(None);
+    let (apply_tx, apply) = C::watch_channel(None);
 
-        let sender = IoProgressSender {
-            log_tx,
-            vote_tx,
-            commit_tx,
-            snapshot_tx,
-            apply_tx,
-        };
-        let watcher = Self {
-            log,
-            vote,
-            commit,
-            snapshot,
-            apply,
-        };
+    let sender = IoProgressSender {
+      log_tx,
+      vote_tx,
+      commit_tx,
+      snapshot_tx,
+      apply_tx,
+    };
+    let watcher = Self {
+      log,
+      vote,
+      commit,
+      snapshot,
+      apply,
+    };
 
-        (sender, watcher)
-    }
+    (sender, watcher)
+  }
 
-    /// Create a watch handle for log I/O flush progress.
-    ///
-    /// Each call creates a new independent handle. Multiple handles can watch the same progress
-    /// concurrently.
-    pub(crate) fn log_progress(&self) -> LogProgress<C> {
-        LogProgress::new(self.log.clone())
-    }
+  /// Create a watch handle for log I/O flush progress.
+  ///
+  /// Each call creates a new independent handle. Multiple handles can watch the same progress
+  /// concurrently.
+  pub(crate) fn log_progress(&self) -> LogProgress<C> {
+    LogProgress::new(self.log.clone())
+  }
 
-    /// Create a watch handle for vote I/O flush progress.
-    ///
-    /// Each call creates a new independent handle. Multiple handles can watch the same progress
-    /// concurrently.
-    pub(crate) fn vote_progress(&self) -> VoteProgress<C> {
-        VoteProgress::new(self.vote.clone())
-    }
+  /// Create a watch handle for vote I/O flush progress.
+  ///
+  /// Each call creates a new independent handle. Multiple handles can watch the same progress
+  /// concurrently.
+  pub(crate) fn vote_progress(&self) -> VoteProgress<C> {
+    VoteProgress::new(self.vote.clone())
+  }
 
-    /// Create a watch handle for commit log progress.
-    ///
-    /// Each call creates a new independent handle. Multiple handles can watch the same progress
-    /// concurrently.
-    pub(crate) fn commit_progress(&self) -> CommitProgress<C> {
-        CommitProgress::new(self.commit.clone())
-    }
+  /// Create a watch handle for commit log progress.
+  ///
+  /// Each call creates a new independent handle. Multiple handles can watch the same progress
+  /// concurrently.
+  pub(crate) fn commit_progress(&self) -> CommitProgress<C> {
+    CommitProgress::new(self.commit.clone())
+  }
 
-    /// Create a watch handle for snapshot persistence progress.
-    ///
-    /// Each call creates a new independent handle. Multiple handles can watch the same progress
-    /// concurrently.
-    pub(crate) fn snapshot_progress(&self) -> SnapshotProgress<C> {
-        SnapshotProgress::new(self.snapshot.clone())
-    }
+  /// Create a watch handle for snapshot persistence progress.
+  ///
+  /// Each call creates a new independent handle. Multiple handles can watch the same progress
+  /// concurrently.
+  pub(crate) fn snapshot_progress(&self) -> SnapshotProgress<C> {
+    SnapshotProgress::new(self.snapshot.clone())
+  }
 
-    /// Create a watch handle for applied log progress.
-    ///
-    /// Each call creates a new independent handle. Multiple handles can watch the same progress
-    /// concurrently.
-    pub(crate) fn apply_progress(&self) -> AppliedProgress<C> {
-        AppliedProgress::new(self.apply.clone())
-    }
+  /// Create a watch handle for applied log progress.
+  ///
+  /// Each call creates a new independent handle. Multiple handles can watch the same progress
+  /// concurrently.
+  pub(crate) fn apply_progress(&self) -> AppliedProgress<C> {
+    AppliedProgress::new(self.apply.clone())
+  }
 }

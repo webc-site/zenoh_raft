@@ -2,12 +2,13 @@ use std::fmt;
 
 use display_more::DisplayOptionExt;
 
-use crate::StoredMembership;
-use crate::log_id::LogId;
-use crate::node::Node;
-use crate::node::NodeId;
-use crate::storage::SnapshotSignature;
-use crate::vote::RaftCommittedLeaderId;
+use crate::{
+  StoredMembership,
+  log_id::LogId,
+  node::{Node, NodeId},
+  storage::SnapshotSignature,
+  vote::RaftCommittedLeaderId,
+};
 
 /// The metadata of a snapshot.
 ///
@@ -34,94 +35,94 @@ use crate::vote::RaftCommittedLeaderId;
 #[derive(Debug, Clone, PartialEq, Eq, bitcode::Encode, bitcode::Decode)]
 pub struct SnapshotMeta<CLID, NID, N>
 where
-    CLID: RaftCommittedLeaderId,
-    NID: NodeId,
-    N: Node,
+  CLID: RaftCommittedLeaderId,
+  NID: NodeId,
+  N: Node,
 {
-    /// Log entries up to which this snapshot includes, inclusive.
-    pub last_log_id: Option<LogId<CLID>>,
+  /// Log entries up to which this snapshot includes, inclusive.
+  pub last_log_id: Option<LogId<CLID>>,
 
-    /// The last applied membership config.
-    pub last_membership: StoredMembership<CLID, NID, N>,
+  /// The last applied membership config.
+  pub last_membership: StoredMembership<CLID, NID, N>,
 }
 
 impl<CLID, NID, N> Default for SnapshotMeta<CLID, NID, N>
 where
-    CLID: RaftCommittedLeaderId,
-    NID: NodeId,
-    N: Node,
+  CLID: RaftCommittedLeaderId,
+  NID: NodeId,
+  N: Node,
 {
-    fn default() -> Self {
-        Self {
-            last_log_id: None,
-            last_membership: StoredMembership::default(),
-        }
+  fn default() -> Self {
+    Self {
+      last_log_id: None,
+      last_membership: StoredMembership::default(),
     }
+  }
 }
 
 impl<CLID, NID, N> fmt::Display for SnapshotMeta<CLID, NID, N>
 where
-    CLID: RaftCommittedLeaderId,
-    NID: NodeId,
-    N: Node,
+  CLID: RaftCommittedLeaderId,
+  NID: NodeId,
+  N: Node,
 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{{last_log:{}, last_membership: {}}}",
-            self.last_log_id.display(),
-            self.last_membership
-        )
-    }
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(
+      f,
+      "{{last_log:{}, last_membership: {}}}",
+      self.last_log_id.display(),
+      self.last_membership
+    )
+  }
 }
 
 impl<CLID, NID, N> SnapshotMeta<CLID, NID, N>
 where
-    CLID: RaftCommittedLeaderId,
-    NID: NodeId,
-    N: Node,
+  CLID: RaftCommittedLeaderId,
+  NID: NodeId,
+  N: Node,
 {
-    /// Get the signature of this snapshot metadata for comparison and identification.
-    pub fn signature(&self) -> SnapshotSignature<CLID> {
-        SnapshotSignature {
-            last_log_id: self.last_log_id.clone(),
-            last_membership_log_id: self
-                .last_membership
-                .log_id()
-                .as_ref()
-                .map(|x| Box::new(x.clone())),
-        }
+  /// Get the signature of this snapshot metadata for comparison and identification.
+  pub fn signature(&self) -> SnapshotSignature<CLID> {
+    SnapshotSignature {
+      last_log_id: self.last_log_id.clone(),
+      last_membership_log_id: self
+        .last_membership
+        .log_id()
+        .as_ref()
+        .map(|x| Box::new(x.clone())),
     }
+  }
 
-    /// Returns a ref to the id of the last log that is included in this snapshot.
-    pub fn last_log_id(&self) -> Option<&LogId<CLID>> {
-        self.last_log_id.as_ref()
-    }
+  /// Returns a ref to the id of the last log that is included in this snapshot.
+  pub fn last_log_id(&self) -> Option<&LogId<CLID>> {
+    self.last_log_id.as_ref()
+  }
 }
 
 #[cfg(test)]
 mod tests {
 
-    #[test]
-    fn test_snapshot_meta_bitcode() {
-        use maplit::btreeset;
+  #[test]
+  fn test_snapshot_meta_bitcode() {
+    use maplit::btreeset;
 
-        use crate::Membership;
-        use crate::StoredMembership;
-        use crate::engine::testing::UTConfig;
-        use crate::engine::testing::log_id;
-        use crate::type_config::alias::SnapshotMetaOf;
+    use crate::{
+      Membership, StoredMembership,
+      engine::testing::{UTConfig, log_id},
+      type_config::alias::SnapshotMetaOf,
+    };
 
-        let meta = SnapshotMetaOf::<UTConfig> {
-            last_log_id: Some(log_id(1, 2, 3)),
-            last_membership: StoredMembership::new(
-                Some(log_id(4, 5, 6)),
-                Membership::new_with_defaults(vec![btreeset! {1,2}], []),
-            ),
-        };
+    let meta = SnapshotMetaOf::<UTConfig> {
+      last_log_id: Some(log_id(1, 2, 3)),
+      last_membership: StoredMembership::new(
+        Some(log_id(4, 5, 6)),
+        Membership::new_with_defaults(vec![btreeset! {1,2}], []),
+      ),
+    };
 
-        let bytes = bitcode::encode(&meta);
-        let decoded: SnapshotMetaOf<UTConfig> = bitcode::decode(&bytes).unwrap();
-        assert_eq!(meta, decoded);
-    }
+    let bytes = bitcode::encode(&meta);
+    let decoded: SnapshotMetaOf<UTConfig> = bitcode::decode(&bytes).unwrap();
+    assert_eq!(meta, decoded);
+  }
 }

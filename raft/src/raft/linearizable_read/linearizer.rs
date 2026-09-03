@@ -1,14 +1,13 @@
-use std::ops::Deref;
-use std::time::Duration;
+use std::{ops::Deref, time::Duration};
 
-use crate::Raft;
-use crate::RaftTypeConfig;
-use crate::errors::Fatal;
-use crate::metrics::WaitError;
-use crate::raft::linearizable_read::LinearizeState;
-use crate::raft::linearizable_read::ReadLogId;
-use crate::storage::RaftStateMachine;
-use crate::type_config::alias::LogIdOf;
+use crate::{
+  Raft, RaftTypeConfig,
+  errors::Fatal,
+  metrics::WaitError,
+  raft::linearizable_read::{LinearizeState, ReadLogId},
+  storage::RaftStateMachine,
+  type_config::alias::LogIdOf,
+};
 
 /// Represents a linearization operation for read.
 ///
@@ -28,130 +27,132 @@ use crate::type_config::alias::LogIdOf;
 #[derive(Debug, Clone)]
 pub struct Linearizer<C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    /// The state containing the read log ID and last applied log ID for linearizable reads.
-    state: LinearizeState<C>,
+  /// The state containing the read log ID and last applied log ID for linearizable reads.
+  state: LinearizeState<C>,
 }
 
 impl<C> Deref for Linearizer<C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    type Target = LinearizeState<C>;
+  type Target = LinearizeState<C>;
 
-    fn deref(&self) -> &Self::Target {
-        &self.state
-    }
+  fn deref(&self) -> &Self::Target {
+    &self.state
+  }
 }
 
 impl<C> Linearizer<C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    pub fn new(node_id: C::NodeId, read_log_id: ReadLogId<C>, applied: Option<LogIdOf<C>>) -> Self {
-        Self {
-            state: LinearizeState::new(node_id, read_log_id, applied),
+  pub fn new(node_id: C::NodeId, read_log_id: ReadLogId<C>, applied: Option<LogIdOf<C>>) -> Self {
+    Self {
+      state: LinearizeState::new(node_id, read_log_id, applied),
+    }
+  }
+
+  /// Replace the last applied log id this linearizer reports.
+  ///
+  /// A queued read observes the applied log id when it is created, which may lag by a heartbeat
+  /// round when the read is finally answered. Refreshing it lets the caller skip waiting for
+  /// apply progress the leader has already made.
+  pub(crate) fn with_applied(self, applied: Option<LogIdOf<C>>) -> Self {
+    let node_id = self.state.node_id().clone();
+    let state = self.state.with_applied(node_id, applied);
+    Self { state }
+  }
+
+  /// Waits indefinitely for the state machine to apply all required log entries for linearizable
+  /// reads.
+  ///
+  /// This is a convenience method that calls [`try_await_ready(_, None)`](Self::try_await_ready)
+  /// with no timeout and unwraps the result.
+  ///
+  /// # Example
+  ///
+  /// ```ignore
+  /// let linearizer = raft.get_read_linearizer().await?;
+  /// let state = linearizer.await_ready(&raft).await?;
+  /// // Now safe to perform linearizable reads
+  /// ```
+  pub async fn await_ready<SM>(self, raft: &Raft<C, SM>) -> Result<LinearizeState<C>, Fatal<C>>
+  where
+    SM: RaftStateMachine<C>,
+  {
+    let state_res = self.try_await_ready::<SM>(raft, None).await?;
+    // Safe unwrap: No timeout error.
+    Ok(state_res.unwrap())
+  }
+
+  /// Waits for the state machine to apply all required log entries for linearizable reads.
+  ///
+  /// This method ensures linearizability by waiting for the state machine to apply all log
+  /// entries up to the `read_log_id`.
+  ///
+  /// # Returns
+  ///
+  /// Returns `Ok(Ok(LinearizeState))` once `applied >= read_log_id`, indicating it's safe to
+  /// perform linearizable reads.
+  ///
+  /// If `timeout` is provided and expires, returns `Ok(Err(LinearizeState))` where
+  /// `applied < read_log_id`, indicating the read cannot be performed yet.
+  ///
+  /// # Example
+  ///
+  /// ```ignore
+  /// let linearizer = raft.get_read_linearizer().await?;
+  /// let state = linearizer.try_await_ready(&raft, Some(Duration::from_secs(1))).await??;
+  /// // Now safe to perform linearizable reads
+  /// ```
+  pub async fn try_await_ready<SM>(
+    self,
+    raft: &Raft<C, SM>,
+    timeout: Option<Duration>,
+  ) -> Result<Result<LinearizeState<C>, LinearizeState<C>>, Fatal<C>>
+  where
+    SM: RaftStateMachine<C>,
+  {
+    let this_id = raft.inner.id();
+
+    if self.state.is_ready_on_node(this_id) {
+      return Ok(Ok(self.state));
+    }
+
+    let expected = Some(self.state.read_log_id().index());
+
+    let res = raft
+      .inner
+      .wait(timeout)
+      .applied_index_at_least(expected, "Linearizer::try_await_ready")
+      .await;
+
+    match res {
+      Ok(metrics) => Ok(Ok(
+        self
+          .state
+          .with_applied(this_id.clone(), metrics.last_applied),
+      )),
+      Err(e) => match e {
+        WaitError::Timeout(..) => {
+          let metrics_rx = &raft.inner.rx_metrics;
+          let ref_metrics = metrics_rx.borrow_watched();
+          let applied = ref_metrics.last_applied.clone();
+
+          let state = self.state.with_applied(this_id.clone(), applied);
+          if state.is_ready_on_node(this_id) {
+            Ok(Ok(state))
+          } else {
+            Ok(Err(state))
+          }
         }
-    }
-
-    /// Replace the last applied log id this linearizer reports.
-    ///
-    /// A queued read observes the applied log id when it is created, which may lag by a heartbeat
-    /// round when the read is finally answered. Refreshing it lets the caller skip waiting for
-    /// apply progress the leader has already made.
-    pub(crate) fn with_applied(self, applied: Option<LogIdOf<C>>) -> Self {
-        let node_id = self.state.node_id().clone();
-        let state = self.state.with_applied(node_id, applied);
-        Self { state }
-    }
-
-    /// Waits indefinitely for the state machine to apply all required log entries for linearizable
-    /// reads.
-    ///
-    /// This is a convenience method that calls [`try_await_ready(_, None)`](Self::try_await_ready)
-    /// with no timeout and unwraps the result.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let linearizer = raft.get_read_linearizer().await?;
-    /// let state = linearizer.await_ready(&raft).await?;
-    /// // Now safe to perform linearizable reads
-    /// ```
-    pub async fn await_ready<SM>(self, raft: &Raft<C, SM>) -> Result<LinearizeState<C>, Fatal<C>>
-    where
-        SM: RaftStateMachine<C>,
-    {
-        let state_res = self.try_await_ready::<SM>(raft, None).await?;
-        // Safe unwrap: No timeout error.
-        Ok(state_res.unwrap())
-    }
-
-    /// Waits for the state machine to apply all required log entries for linearizable reads.
-    ///
-    /// This method ensures linearizability by waiting for the state machine to apply all log
-    /// entries up to the `read_log_id`.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(Ok(LinearizeState))` once `applied >= read_log_id`, indicating it's safe to
-    /// perform linearizable reads.
-    ///
-    /// If `timeout` is provided and expires, returns `Ok(Err(LinearizeState))` where
-    /// `applied < read_log_id`, indicating the read cannot be performed yet.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let linearizer = raft.get_read_linearizer().await?;
-    /// let state = linearizer.try_await_ready(&raft, Some(Duration::from_secs(1))).await??;
-    /// // Now safe to perform linearizable reads
-    /// ```
-    pub async fn try_await_ready<SM>(
-        self,
-        raft: &Raft<C, SM>,
-        timeout: Option<Duration>,
-    ) -> Result<Result<LinearizeState<C>, LinearizeState<C>>, Fatal<C>>
-    where
-        SM: RaftStateMachine<C>,
-    {
-        let this_id = raft.inner.id();
-
-        if self.state.is_ready_on_node(this_id) {
-            return Ok(Ok(self.state));
+        WaitError::ShuttingDown => {
+          let err = raft.inner.get_core_stop_error().await;
+          Err(err)
         }
-
-        let expected = Some(self.state.read_log_id().index());
-
-        let res = raft
-            .inner
-            .wait(timeout)
-            .applied_index_at_least(expected, "Linearizer::try_await_ready")
-            .await;
-
-        match res {
-            Ok(metrics) => Ok(Ok(self
-                .state
-                .with_applied(this_id.clone(), metrics.last_applied))),
-            Err(e) => match e {
-                WaitError::Timeout(_, _) => {
-                    let metrics_rx = &raft.inner.rx_metrics;
-                    let ref_metrics = metrics_rx.borrow_watched();
-                    let applied = ref_metrics.last_applied.clone();
-
-                    let state = self.state.with_applied(this_id.clone(), applied);
-                    if state.is_ready_on_node(this_id) {
-                        Ok(Ok(state))
-                    } else {
-                        Ok(Err(state))
-                    }
-                }
-                WaitError::ShuttingDown => {
-                    let err = raft.inner.get_core_stop_error().await;
-                    Err(err)
-                }
-            },
-        }
+      },
     }
+  }
 }

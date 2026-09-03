@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use crate::Membership;
-use crate::proposer::Candidate;
-use crate::proposer::Leader;
-use crate::type_config::alias::NodeIdOf;
-use crate::type_config::alias::NodeOf;
+use crate::{
+  Membership,
+  proposer::{Candidate, Leader},
+  type_config::alias::{NodeIdOf, NodeOf},
+};
 
 /// The quorum set type used by `Leader`.
 pub(crate) type LeaderQuorumSet<C> = Arc<Membership<NodeIdOf<C>, NodeOf<C>>>;

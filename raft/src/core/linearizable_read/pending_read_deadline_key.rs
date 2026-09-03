@@ -7,6 +7,6 @@
 /// [`LinearizerOption::wait_timeout`]: crate::raft::linearizable_read::LinearizerOption
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct PendingReadDeadlineKey<I> {
-    pub(super) deadline: I,
-    pub(super) sequence: u64,
+  pub(super) deadline: I,
+  pub(super) sequence: u64,
 }

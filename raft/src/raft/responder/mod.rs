@@ -2,12 +2,9 @@
 
 pub(crate) mod core_responder;
 pub(crate) mod impls;
-pub use impls::OneshotResponder;
-pub use impls::ProgressResponder;
+pub use impls::{OneshotResponder, ProgressResponder};
 
-use crate::OptionalSend;
-use crate::RaftTypeConfig;
-use crate::type_config::alias::LogIdOf;
+use crate::{OptionalSend, RaftTypeConfig, type_config::alias::LogIdOf};
 
 /// A trait that lets `RaftCore` send a result back to the client or to somewhere else.
 ///
@@ -24,26 +21,26 @@ use crate::type_config::alias::LogIdOf;
 /// - `T`: The type of value to send through this responder
 pub trait Responder<C, T>
 where
-    Self: OptionalSend + Sized + 'static,
-    C: RaftTypeConfig,
+  Self: OptionalSend + Sized + 'static,
+  C: RaftTypeConfig,
 {
-    /// Called when the log entry is locally committed (safe to read).
-    ///
-    /// Invoked when the log has been replicated to a quorum. At this point, the log is guaranteed
-    /// to be visible to all future leaders and can be read immediately.
-    ///
-    /// # Parameters
-    ///
-    /// - `log_id`: The log ID assigned by the proposing leader.
-    ///
-    /// Default implementation does nothing.
-    fn on_commit(&mut self, _: LogIdOf<C>) {}
+  /// Called when the log entry is locally committed (safe to read).
+  ///
+  /// Invoked when the log has been replicated to a quorum. At this point, the log is guaranteed
+  /// to be visible to all future leaders and can be read immediately.
+  ///
+  /// # Parameters
+  ///
+  /// - `log_id`: The log ID assigned by the proposing leader.
+  ///
+  /// Default implementation does nothing.
+  fn on_commit(&mut self, _: LogIdOf<C>) {}
 
-    /// Called when the request completes (applied; previously it is `send`).
-    /// Send the final result to the client.
-    ///
-    /// Invoked in two scenarios:
-    /// - **Normal**: Log entry applied to the state machine
-    /// - **Early termination**: Request failed (e.g., `ForwardToLeader` error)
-    fn on_complete(self, result: T);
+  /// Called when the request completes (applied; previously it is `send`).
+  /// Send the final result to the client.
+  ///
+  /// Invoked in two scenarios:
+  /// - **Normal**: Log entry applied to the state machine
+  /// - **Early termination**: Request failed (e.g., `ForwardToLeader` error)
+  fn on_complete(self, result: T);
 }

@@ -17,5 +17,4 @@ pub(crate) mod vec_progress_entry;
 
 pub(crate) use inflight::Inflight;
 pub(crate) use vec_progress::VecProgress;
-pub(crate) use vec_progress_entry::VecProgressEntry;
-pub(crate) use vec_progress_entry::VecProgressEntryData;
+pub(crate) use vec_progress_entry::{VecProgressEntry, VecProgressEntryData};

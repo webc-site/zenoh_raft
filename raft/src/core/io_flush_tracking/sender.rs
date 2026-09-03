@@ -1,11 +1,11 @@
 use display_more::DisplayOptionExt;
 
-use crate::RaftTypeConfig;
-use crate::Vote;
-use crate::core::io_flush_tracking::FlushPoint;
-use crate::raft_state::IOId;
-use crate::type_config::alias::LogIdOf;
-use crate::type_config::alias::WatchSenderOf;
+use crate::{
+  RaftTypeConfig, Vote,
+  core::io_flush_tracking::FlushPoint,
+  raft_state::IOId,
+  type_config::alias::{LogIdOf, WatchSenderOf},
+};
 
 /// Sender for publishing I/O flush progress notifications.
 ///
@@ -14,115 +14,115 @@ use crate::type_config::alias::WatchSenderOf;
 /// efficient filtering of notifications.
 pub(crate) struct IoProgressSender<C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    /// Sender for log I/O progress (includes all I/O operations).
-    pub(crate) log_tx: WatchSenderOf<C, Option<FlushPoint<C>>>,
+  /// Sender for log I/O progress (includes all I/O operations).
+  pub(crate) log_tx: WatchSenderOf<C, Option<FlushPoint<C>>>,
 
-    /// Sender for vote I/O progress (vote-specific updates).
-    ///
-    /// Note: Uses `Vote<C::LeaderId>` (the internal concrete type) instead of `VoteOf<C>` (the
-    /// trait) because `PartialOrd` is required for progress tracking but user-provided
-    /// `VoteOf<C>` implementations may not provide it.
-    pub(crate) vote_tx: WatchSenderOf<C, Option<Vote<C::LeaderId>>>,
+  /// Sender for vote I/O progress (vote-specific updates).
+  ///
+  /// Note: Uses `Vote<C::LeaderId>` (the internal concrete type) instead of `VoteOf<C>` (the
+  /// trait) because `PartialOrd` is required for progress tracking but user-provided
+  /// `VoteOf<C>` implementations may not provide it.
+  pub(crate) vote_tx: WatchSenderOf<C, Option<Vote<C::LeaderId>>>,
 
-    /// Sender for commit progress (state machine submission).
-    pub(crate) commit_tx: WatchSenderOf<C, Option<LogIdOf<C>>>,
+  /// Sender for commit progress (state machine submission).
+  pub(crate) commit_tx: WatchSenderOf<C, Option<LogIdOf<C>>>,
 
-    /// Sender for snapshot persistence progress.
-    pub(crate) snapshot_tx: WatchSenderOf<C, Option<LogIdOf<C>>>,
+  /// Sender for snapshot persistence progress.
+  pub(crate) snapshot_tx: WatchSenderOf<C, Option<LogIdOf<C>>>,
 
-    /// Sender for last-applied log progress (state machine application).
-    pub(crate) apply_tx: WatchSenderOf<C, Option<LogIdOf<C>>>,
+  /// Sender for last-applied log progress (state machine application).
+  pub(crate) apply_tx: WatchSenderOf<C, Option<LogIdOf<C>>>,
 }
 
 impl<C> IoProgressSender<C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    /// Publish an I/O flush completion notification to watchers.
-    ///
-    /// Updates progress channels conditionally:
-    /// - **vote_tx**: Updated only when the vote changes (new term or leader)
-    /// - **log_tx**: Updated when either vote or log_id changes (any I/O progress)
-    ///
-    /// This separation allows applications to efficiently wait for leadership changes
-    /// without being notified of every log append.
-    ///
-    /// # Arguments
-    ///
-    /// * `io_id` - The I/O operation that just completed. `None` means no progress to report.
-    pub(crate) fn send_log_progress(&self, io_id: Option<IOId<C>>) -> Option<()> {
-        log::debug!("send_log_progress: try to update to :{}", io_id.display());
+  /// Publish an I/O flush completion notification to watchers.
+  ///
+  /// Updates progress channels conditionally:
+  /// - **vote_tx**: Updated only when the vote changes (new term or leader)
+  /// - **log_tx**: Updated when either vote or log_id changes (any I/O progress)
+  ///
+  /// This separation allows applications to efficiently wait for leadership changes
+  /// without being notified of every log append.
+  ///
+  /// # Arguments
+  ///
+  /// * `io_id` - The I/O operation that just completed. `None` means no progress to report.
+  pub(crate) fn send_log_progress(&self, io_id: Option<IOId<C>>) -> Option<()> {
+    log::debug!("send_log_progress: try to update to :{}", io_id.display());
 
-        let (vote, log_id) = io_id?.to_vote_and_log_id();
+    let (vote, log_id) = io_id?.to_vote_and_log_id();
 
-        {
-            let vote = vote.clone();
+    {
+      let vote = vote.clone();
 
-            self.vote_tx.send_if_modified(move |prev| {
-                if prev.as_ref() != Some(&vote) {
-                    log::debug!("send_log_progress: update vote to :{}", vote);
-                    *prev = Some(vote);
-                    true
-                } else {
-                    false
-                }
-            });
+      self.vote_tx.send_if_modified(move |prev| {
+        if prev.as_ref() != Some(&vote) {
+          log::debug!("send_log_progress: update vote to :{}", vote);
+          *prev = Some(vote);
+          true
+        } else {
+          false
         }
-
-        self.log_tx.send_if_modified(move |prev| {
-            let x = Some(FlushPoint::new(vote, log_id));
-            if prev.as_ref() != x.as_ref() {
-                log::debug!("send_log_progress: update log to :{}", x.display());
-                *prev = x;
-                true
-            } else {
-                false
-            }
-        });
-
-        Some(())
+      });
     }
 
-    fn update_log_id_progress(
-        tx: &WatchSenderOf<C, Option<LogIdOf<C>>>,
-        name: &str,
-        log_id: Option<LogIdOf<C>>,
-    ) -> Option<()> {
+    self.log_tx.send_if_modified(move |prev| {
+      let x = Some(FlushPoint::new(vote, log_id));
+      if prev.as_ref() != x.as_ref() {
+        log::debug!("send_log_progress: update log to :{}", x.display());
+        *prev = x;
+        true
+      } else {
+        false
+      }
+    });
+
+    Some(())
+  }
+
+  fn update_log_id_progress(
+    tx: &WatchSenderOf<C, Option<LogIdOf<C>>>,
+    name: &str,
+    log_id: Option<LogIdOf<C>>,
+  ) -> Option<()> {
+    log::debug!(
+      "send_{name}_progress: try to update to :{}",
+      log_id.display()
+    );
+
+    tx.send_if_modified(move |prev| {
+      if prev.as_ref() != log_id.as_ref() {
         log::debug!(
-            "send_{name}_progress: try to update to :{}",
-            log_id.display()
+          "send_{name}_progress: update {name} to :{}",
+          log_id.display()
         );
+        *prev = log_id.clone();
+        true
+      } else {
+        false
+      }
+    });
 
-        tx.send_if_modified(move |prev| {
-            if prev.as_ref() != log_id.as_ref() {
-                log::debug!(
-                    "send_{name}_progress: update {name} to :{}",
-                    log_id.display()
-                );
-                *prev = log_id.clone();
-                true
-            } else {
-                false
-            }
-        });
+    Some(())
+  }
 
-        Some(())
-    }
+  /// Publish the latest commit log id progress.
+  pub(crate) fn send_commit_progress(&self, log_id: Option<LogIdOf<C>>) -> Option<()> {
+    Self::update_log_id_progress(&self.commit_tx, "commit", log_id)
+  }
 
-    /// Publish the latest commit log id progress.
-    pub(crate) fn send_commit_progress(&self, log_id: Option<LogIdOf<C>>) -> Option<()> {
-        Self::update_log_id_progress(&self.commit_tx, "commit", log_id)
-    }
+  /// Publish the latest snapshot log id progress.
+  pub(crate) fn send_snapshot_progress(&self, log_id: Option<LogIdOf<C>>) -> Option<()> {
+    Self::update_log_id_progress(&self.snapshot_tx, "snapshot", log_id)
+  }
 
-    /// Publish the latest snapshot log id progress.
-    pub(crate) fn send_snapshot_progress(&self, log_id: Option<LogIdOf<C>>) -> Option<()> {
-        Self::update_log_id_progress(&self.snapshot_tx, "snapshot", log_id)
-    }
-
-    /// Publish the latest applied log id progress.
-    pub(crate) fn send_apply_progress(&self, log_id: Option<LogIdOf<C>>) -> Option<()> {
-        Self::update_log_id_progress(&self.apply_tx, "applied", log_id)
-    }
+  /// Publish the latest applied log id progress.
+  pub(crate) fn send_apply_progress(&self, log_id: Option<LogIdOf<C>>) -> Option<()> {
+    Self::update_log_id_progress(&self.apply_tx, "applied", log_id)
+  }
 }

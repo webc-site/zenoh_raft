@@ -1,5 +1,4 @@
-use crate::RaftTypeConfig;
-use crate::storage::apply_responder_inner::ApplyResponderInner;
+use crate::{RaftTypeConfig, storage::apply_responder_inner::ApplyResponderInner};
 
 /// Responder for sending client write responses after applying an entry.
 ///
@@ -49,16 +48,16 @@ use crate::storage::apply_responder_inner::ApplyResponderInner;
 /// }
 /// ```
 pub struct ApplyResponder<C: RaftTypeConfig> {
-    pub(crate) inner: ApplyResponderInner<C>,
+  pub(crate) inner: ApplyResponderInner<C>,
 }
 
 impl<C: RaftTypeConfig> ApplyResponder<C> {
-    /// Send the response after applying an entry.
-    ///
-    /// The response will be returned by [`Raft::client_write`](crate::Raft::client_write).
-    /// This method must be called by [`RaftStateMachine::apply`](super::RaftStateMachine::apply),
-    /// otherwise [`Raft::client_write`](crate::Raft::client_write) will never return.
-    pub fn send(self, response: C::R) {
-        self.inner.send(response)
-    }
+  /// Send the response after applying an entry.
+  ///
+  /// The response will be returned by [`Raft::client_write`](crate::Raft::client_write).
+  /// This method must be called by [`RaftStateMachine::apply`](super::RaftStateMachine::apply),
+  /// otherwise [`Raft::client_write`](crate::Raft::client_write) will never return.
+  pub fn send(self, response: C::R) {
+    self.inner.send(response)
+  }
 }

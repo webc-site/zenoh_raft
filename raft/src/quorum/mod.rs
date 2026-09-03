@@ -13,6 +13,5 @@ mod coherent_test;
 #[cfg(test)]
 mod quorum_set_test;
 
-pub(crate) use coherent::Coherent;
-pub(crate) use coherent::FindCoherent;
+pub(crate) use coherent::{Coherent, FindCoherent};
 pub use quorum_set::QuorumSet;

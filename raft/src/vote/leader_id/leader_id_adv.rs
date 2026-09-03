@@ -2,9 +2,10 @@
 
 use std::fmt;
 
-use crate::NodeId;
-use crate::vote::RaftLeaderId;
-use crate::vote::RaftTerm;
+use crate::{
+  NodeId,
+  vote::{RaftLeaderId, RaftTerm},
+};
 
 /// ID of a `leader`, allowing multiple leaders per term.
 ///
@@ -14,23 +15,23 @@ use crate::vote::RaftTerm;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, bitcode::Encode, bitcode::Decode)]
 pub struct LeaderId<Term, NID>
 where
-    Term: RaftTerm,
-    NID: NodeId,
+  Term: RaftTerm,
+  NID: NodeId,
 {
-    /// The term of the leader.
-    pub term: Term,
-    /// The node ID of the leader.
-    pub node_id: NID,
+  /// The term of the leader.
+  pub term: Term,
+  /// The node ID of the leader.
+  pub node_id: NID,
 }
 
 impl<Term, NID> fmt::Display for LeaderId<Term, NID>
 where
-    Term: RaftTerm,
-    NID: NodeId,
+  Term: RaftTerm,
+  NID: NodeId,
 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "T{}-N{}", self.term, self.node_id)
-    }
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(f, "T{}-N{}", self.term, self.node_id)
+  }
 }
 
 /// The unique identifier of a leader that is already granted by a quorum in phase-1(voting).
@@ -49,62 +50,62 @@ pub type CommittedLeaderId<Term, NID> = LeaderId<Term, NID>;
 
 impl<Term, NID> RaftLeaderId for LeaderId<Term, NID>
 where
-    Term: RaftTerm,
-    NID: NodeId,
+  Term: RaftTerm,
+  NID: NodeId,
 {
-    type Term = Term;
-    type NodeId = NID;
-    type Committed = Self;
+  type Term = Term;
+  type NodeId = NID;
+  type Committed = Self;
 
-    fn new(term: Term, node_id: NID) -> Self {
-        Self { term, node_id }
-    }
+  fn new(term: Term, node_id: NID) -> Self {
+    Self { term, node_id }
+  }
 
-    fn term(&self) -> Term {
-        self.term
-    }
+  fn term(&self) -> Term {
+    self.term
+  }
 
-    fn node_id(&self) -> &NID {
-        &self.node_id
-    }
+  fn node_id(&self) -> &NID {
+    &self.node_id
+  }
 
-    fn to_committed(&self) -> Self::Committed {
-        self.clone()
-    }
+  fn to_committed(&self) -> Self::Committed {
+    self.clone()
+  }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::LeaderId;
-    use crate::vote::RaftLeaderId;
+  use super::LeaderId;
+  use crate::vote::RaftLeaderId;
 
-    #[test]
-    fn test_committed_leader_id_serde() -> anyhow::Result<()> {
-        let c = LeaderId::<u64, u64>::new_committed(5, 10);
-        let bytes = bitcode::encode(&c);
-        let c2: LeaderId<u64, u64> = bitcode::decode(&bytes)?;
-        assert_eq!(LeaderId::<u64, u64>::new_committed(5, 10), c2);
+  #[test]
+  fn test_committed_leader_id_serde() -> anyhow::Result<()> {
+    let c = LeaderId::<u64, u64>::new_committed(5, 10);
+    let bytes = bitcode::encode(&c);
+    let c2: LeaderId<u64, u64> = bitcode::decode(&bytes)?;
+    assert_eq!(LeaderId::<u64, u64>::new_committed(5, 10), c2);
 
-        Ok(())
-    }
+    Ok(())
+  }
 
-    #[test]
-    fn test_adv_leader_id_partial_order() -> anyhow::Result<()> {
-        let lid = |term, node_id| LeaderId::<u64, u64>::new(term, node_id);
+  #[test]
+  fn test_adv_leader_id_partial_order() -> anyhow::Result<()> {
+    let lid = |term, node_id| LeaderId::<u64, u64>::new(term, node_id);
 
-        // Compare term first
-        assert!(lid(2, 2) > lid(1, 2));
-        assert!(lid(1, 2) < lid(2, 2));
+    // Compare term first
+    assert!(lid(2, 2) > lid(1, 2));
+    assert!(lid(1, 2) < lid(2, 2));
 
-        // Equal term
-        assert!(lid(2, 2) > lid(2, 1));
-        assert!(lid(2, 1) < lid(2, 2));
+    // Equal term
+    assert!(lid(2, 2) > lid(2, 1));
+    assert!(lid(2, 1) < lid(2, 2));
 
-        // Equal term, node_id
-        assert!(lid(2, 2) == lid(2, 2));
-        assert!(lid(2, 2) >= lid(2, 2));
-        assert!(lid(2, 2) <= lid(2, 2));
+    // Equal term, node_id
+    assert!(lid(2, 2) == lid(2, 2));
+    assert!(lid(2, 2) >= lid(2, 2));
+    assert!(lid(2, 2) <= lid(2, 2));
 
-        Ok(())
-    }
+    Ok(())
+  }
 }

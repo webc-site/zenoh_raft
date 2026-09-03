@@ -1,16 +1,18 @@
-use std::collections::BTreeSet;
-use std::fmt;
-use std::sync::Arc;
+use std::{
+  collections::{BTreeSet, btree_set::IntoIter},
+  fmt,
+  sync::Arc,
+};
 
 use display_more::DisplayOptionExt;
 
-use crate::Membership;
-use crate::log_id::LogId;
-use crate::node::Node;
-use crate::node::NodeId;
-use crate::quorum::QuorumSet;
-use crate::vote::RaftCommittedLeaderId;
-use std::collections::btree_set::IntoIter;
+use crate::{
+  Membership,
+  log_id::LogId,
+  node::{Node, NodeId},
+  quorum::QuorumSet,
+  vote::RaftCommittedLeaderId,
+};
 
 /// This struct represents information about a membership config that has already been stored in the
 /// raft logs.
@@ -24,123 +26,120 @@ use std::collections::btree_set::IntoIter;
 #[derive(Clone, Debug, PartialEq, Eq, bitcode::Encode, bitcode::Decode)]
 pub struct StoredMembership<CLID, NID, N>
 where
-    CLID: RaftCommittedLeaderId,
-    NID: NodeId,
-    N: Node,
+  CLID: RaftCommittedLeaderId,
+  NID: NodeId,
+  N: Node,
 {
-    /// The id of the log that stores this membership config
-    log_id: Option<LogId<CLID>>,
+  /// The id of the log that stores this membership config
+  log_id: Option<LogId<CLID>>,
 
-    /// Membership config
-    membership: Membership<NID, N>,
+  /// Membership config
+  membership: Membership<NID, N>,
 }
 
 impl<CLID, NID, N> Default for StoredMembership<CLID, NID, N>
 where
-    CLID: RaftCommittedLeaderId,
-    NID: NodeId,
-    N: Node,
+  CLID: RaftCommittedLeaderId,
+  NID: NodeId,
+  N: Node,
 {
-    fn default() -> Self {
-        Self {
-            log_id: None,
-            membership: Membership::default(),
-        }
+  fn default() -> Self {
+    Self {
+      log_id: None,
+      membership: Membership::default(),
     }
+  }
 }
 
 impl<CLID, NID, N> StoredMembership<CLID, NID, N>
 where
-    CLID: RaftCommittedLeaderId,
-    NID: NodeId,
-    N: Node,
+  CLID: RaftCommittedLeaderId,
+  NID: NodeId,
+  N: Node,
 {
-    /// Create a new StoredMembership with the given log ID and membership configuration.
-    pub fn new(log_id: Option<LogId<CLID>>, membership: Membership<NID, N>) -> Self {
-        Self { log_id, membership }
-    }
+  /// Create a new StoredMembership with the given log ID and membership configuration.
+  pub fn new(log_id: Option<LogId<CLID>>, membership: Membership<NID, N>) -> Self {
+    Self { log_id, membership }
+  }
 
-    pub(crate) fn new_arc(
-        log_id: Option<LogId<CLID>>,
-        membership: Membership<NID, N>,
-    ) -> Arc<Self> {
-        Arc::new(Self::new(log_id, membership))
-    }
+  pub(crate) fn new_arc(log_id: Option<LogId<CLID>>, membership: Membership<NID, N>) -> Arc<Self> {
+    Arc::new(Self::new(log_id, membership))
+  }
 
-    /// Get the log ID at which this membership was stored.
-    pub fn log_id(&self) -> &Option<LogId<CLID>> {
-        &self.log_id
-    }
+  /// Get the log ID at which this membership was stored.
+  pub fn log_id(&self) -> &Option<LogId<CLID>> {
+    &self.log_id
+  }
 
-    /// Get the membership configuration.
-    pub fn membership(&self) -> &Membership<NID, N> {
-        &self.membership
-    }
+  /// Get the membership configuration.
+  pub fn membership(&self) -> &Membership<NID, N> {
+    &self.membership
+  }
 
-    pub(crate) fn is_voter(&self, nid: &NID) -> bool {
-        self.membership.is_voter(nid)
-    }
+  pub(crate) fn is_voter(&self, nid: &NID) -> bool {
+    self.membership.is_voter(nid)
+  }
 
-    /// Get an iterator over the voter node IDs.
-    pub fn voter_ids(&self) -> impl Iterator<Item = NID> {
-        self.membership.voter_ids()
-    }
+  /// Get an iterator over the voter node IDs.
+  pub fn voter_ids(&self) -> impl Iterator<Item = NID> {
+    self.membership.voter_ids()
+  }
 
-    /// Returns an Iterator of all learner node ids. Voters are not included.
-    pub(crate) fn learner_ids(&self) -> impl Iterator<Item = NID> + '_ {
-        self.membership.learner_ids()
-    }
+  /// Returns an Iterator of all learner node ids. Voters are not included.
+  pub(crate) fn learner_ids(&self) -> impl Iterator<Item = NID> + '_ {
+    self.membership.learner_ids()
+  }
 
-    /// Get the node (either voter or learner) by node id.
-    pub fn get_node(&self, node_id: &NID) -> Option<&N> {
-        self.membership.get_node(node_id)
-    }
+  /// Get the node (either voter or learner) by node id.
+  pub fn get_node(&self, node_id: &NID) -> Option<&N> {
+    self.membership.get_node(node_id)
+  }
 
-    /// Get an iterator over all nodes (ID and node information).
-    pub fn nodes(&self) -> impl Iterator<Item = (&NID, &N)> {
-        self.membership.nodes()
-    }
+  /// Get an iterator over all nodes (ID and node information).
+  pub fn nodes(&self) -> impl Iterator<Item = (&NID, &N)> {
+    self.membership.nodes()
+  }
 
-    /// Returns reference to the joint config.
-    ///
-    /// Membership is defined by a joint of multiple configs.
-    /// Each config is a set of node-id.
-    pub fn get_joint_config(&self) -> &Vec<BTreeSet<NID>> {
-        self.membership.get_joint_config()
-    }
+  /// Returns reference to the joint config.
+  ///
+  /// Membership is defined by a joint of multiple configs.
+  /// Each config is a set of node-id.
+  pub fn get_joint_config(&self) -> &Vec<BTreeSet<NID>> {
+    self.membership.get_joint_config()
+  }
 }
 
 impl<CLID, NID, N> fmt::Display for StoredMembership<CLID, NID, N>
 where
-    CLID: RaftCommittedLeaderId,
-    NID: NodeId,
-    N: Node,
+  CLID: RaftCommittedLeaderId,
+  NID: NodeId,
+  N: Node,
 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{{log_id:{}, {}}}",
-            self.log_id.display(),
-            self.membership
-        )
-    }
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(
+      f,
+      "{{log_id:{}, {}}}",
+      self.log_id.display(),
+      self.membership
+    )
+  }
 }
 
 /// Implement node-id joint quorum set.
 impl<CLID, NID, N> QuorumSet for StoredMembership<CLID, NID, N>
 where
-    CLID: RaftCommittedLeaderId,
-    NID: NodeId,
-    N: Node,
+  CLID: RaftCommittedLeaderId,
+  NID: NodeId,
+  N: Node,
 {
-    type Id = NID;
-    type Iter = IntoIter<NID>;
+  type Id = NID;
+  type Iter = IntoIter<NID>;
 
-    fn is_quorum<'a, I: Iterator<Item = &'a NID> + Clone>(&self, ids: I) -> bool {
-        self.membership.is_quorum(ids)
-    }
+  fn is_quorum<'a, I: Iterator<Item = &'a NID> + Clone>(&self, ids: I) -> bool {
+    self.membership.is_quorum(ids)
+  }
 
-    fn ids(&self) -> Self::Iter {
-        self.membership.ids()
-    }
+  fn ids(&self) -> Self::Iter {
+    self.membership.ids()
+  }
 }

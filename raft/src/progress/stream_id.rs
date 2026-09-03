@@ -1,6 +1,4 @@
-use std::fmt;
-use std::fmt::Formatter;
-use std::ops::Deref;
+use std::{fmt, fmt::Formatter, ops::Deref};
 
 /// Unique identifier for an inflight replication request.
 ///
@@ -13,25 +11,25 @@ use std::ops::Deref;
 /// the mismatched `InflightId` causes the stale response to be ignored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct StreamId {
-    id: u64,
+  id: u64,
 }
 
 impl StreamId {
-    pub(crate) fn new(id: u64) -> Self {
-        Self { id }
-    }
+  pub(crate) fn new(id: u64) -> Self {
+    Self { id }
+  }
 }
 
 impl Deref for StreamId {
-    type Target = u64;
+  type Target = u64;
 
-    fn deref(&self) -> &Self::Target {
-        &self.id
-    }
+  fn deref(&self) -> &Self::Target {
+    &self.id
+  }
 }
 
 impl fmt::Display for StreamId {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "StreamId({})", self.id)
-    }
+  fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    write!(f, "StreamId({})", self.id)
+  }
 }

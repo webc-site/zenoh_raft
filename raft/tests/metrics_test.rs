@@ -5,980 +5,964 @@ mod fixtures;
 use std::sync::Arc;
 
 use anyhow::Result;
+use fixtures::{RaftRouter, log_id, timeout};
 use maplit::btreeset;
-use zenoh_raft::Config;
-use zenoh_raft::ServerState;
-use zenoh_raft::type_config::TypeConfigExt;
-
-use fixtures::RaftRouter;
-use fixtures::log_id;
-use fixtures::timeout;
+use zenoh_raft::{Config, ServerState, type_config::TypeConfigExt};
 
 /// 当前 Leader 指标测试
 #[compio::test]
 async fn test_current_leader() -> Result<()> {
-    let config = Arc::new(
-        Config {
-            enable_heartbeat: false,
-            enable_elect: false,
-            ..Default::default()
-        }
-        .validate()?,
-    );
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_elect: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
 
-    let mut router = RaftRouter::new(config.clone());
-    router
-        .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
-        .await?;
+  let mut router = RaftRouter::new(config.clone());
+  router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
 
-    let leader = router.leader();
-    assert_eq!(leader, Some(0));
+  let leader = router.leader();
+  assert_eq!(leader, Some(0));
 
-    let m0 = router.get_metrics(&0)?;
-    assert_eq!(m0.current_leader, Some(0));
-    assert_eq!(m0.state, ServerState::Leader);
+  let m0 = router.get_metrics(&0)?;
+  assert_eq!(m0.current_leader, Some(0));
+  assert_eq!(m0.state, ServerState::Leader);
 
-    let m1 = router.get_metrics(&1)?;
-    assert_eq!(m1.current_leader, Some(0));
-    assert_eq!(m1.state, ServerState::Follower);
+  let m1 = router.get_metrics(&1)?;
+  assert_eq!(m1.current_leader, Some(0));
+  assert_eq!(m1.state, ServerState::Follower);
 
-    Ok(())
+  Ok(())
 }
 
 /// 状态机应用指标一致性测试
 #[compio::test]
 async fn test_metrics_state_machine_consistency() -> Result<()> {
-    let config = Arc::new(
-        Config {
-            enable_heartbeat: false,
-            enable_elect: false,
-            ..Default::default()
-        }
-        .validate()?,
-    );
-
-    let mut router = RaftRouter::new(config.clone());
-    let mut log_index = router
-        .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
-        .await?;
-
-    router.client_request_many(0, "metrics", 5).await?;
-    log_index += 5;
-
-    for id in [0, 1, 2] {
-        router
-            .wait(&id, timeout())
-            .applied_index(Some(log_index), "all metrics updated")
-            .await?;
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_elect: false,
+      ..Default::default()
     }
+    .validate()?,
+  );
 
-    Ok(())
+  let mut router = RaftRouter::new(config.clone());
+  let mut log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
+
+  router.client_request_many(0, "metrics", 5).await?;
+  log_index += 5;
+
+  for id in [0, 1, 2] {
+    router
+      .wait(&id, timeout())
+      .applied_index(Some(log_index), "all metrics updated")
+      .await?;
+  }
+
+  Ok(())
 }
 
 /// Leader 指标 (last_quorum_acked, replication metrics, purged) 监控测试
 #[compio::test]
 async fn test_leader_metrics() -> Result<()> {
-    let config = Arc::new(
-        Config {
-            enable_heartbeat: true,
-            heartbeat_interval: 100,
-            election_timeout_min: 500,
-            election_timeout_max: 600,
-            ..Default::default()
-        }
-        .validate()?,
-    );
-
-    let mut router = RaftRouter::new(config.clone());
-    let mut log_index = router.new_cluster(btreeset! {0, 1}, btreeset! {2}).await?;
-
-    router.client_request_many(0, "metrics", 5).await?;
-    log_index += 5;
-
-    for id in [0, 1, 2] {
-        router
-            .wait(&id, timeout())
-            .applied_index(Some(log_index), "applied 5 writes")
-            .await?;
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: true,
+      heartbeat_interval: 100,
+      election_timeout_min: 500,
+      election_timeout_max: 600,
+      ..Default::default()
     }
+    .validate()?,
+  );
 
-    let n0 = router.get_raft_handle(&0)?;
-    let metrics = n0.metrics().borrow_watched().clone();
-    assert_eq!(metrics.state, ServerState::Leader);
-    assert_eq!(metrics.current_term, 1);
-    assert_eq!(metrics.last_log_index, Some(log_index));
-    assert!(
-        metrics
-            .membership_config
-            .membership()
-            .voter_ids()
-            .any(|x| x == 0)
-    );
-    assert!(
-        metrics
-            .membership_config
-            .membership()
-            .voter_ids()
-            .any(|x| x == 1)
-    );
-    assert!(
-        metrics
-            .membership_config
-            .membership()
-            .learner_ids()
-            .any(|x| x == 2)
-    );
+  let mut router = RaftRouter::new(config.clone());
+  let mut log_index = router.new_cluster(btreeset! {0, 1}, btreeset! {2}).await?;
 
-    Ok(())
+  router.client_request_many(0, "metrics", 5).await?;
+  log_index += 5;
+
+  for id in [0, 1, 2] {
+    router
+      .wait(&id, timeout())
+      .applied_index(Some(log_index), "applied 5 writes")
+      .await?;
+  }
+
+  let n0 = router.get_raft_handle(&0)?;
+  let metrics = n0.metrics().borrow_watched().clone();
+  assert_eq!(metrics.state, ServerState::Leader);
+  assert_eq!(metrics.current_term, 1);
+  assert_eq!(metrics.last_log_index, Some(log_index));
+  assert!(
+    metrics
+      .membership_config
+      .membership()
+      .voter_ids()
+      .any(|x| x == 0)
+  );
+  assert!(
+    metrics
+      .membership_config
+      .membership()
+      .voter_ids()
+      .any(|x| x == 1)
+  );
+  assert!(
+    metrics
+      .membership_config
+      .membership()
+      .learner_ids()
+      .any(|x| x == 2)
+  );
+
+  Ok(())
 }
 
 /// Server metrics 与 Data metrics 行为测试
 #[compio::test]
 async fn test_server_metrics_and_data_metrics() -> Result<()> {
-    let config = Arc::new(
-        Config {
-            enable_heartbeat: false,
-            enable_elect: false,
-            ..Default::default()
-        }
-        .validate()?,
-    );
-    let mut router = RaftRouter::new(config.clone());
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_elect: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config.clone());
 
-    let mut log_index = router.new_cluster(btreeset! {0,1,2}, btreeset! {}).await?;
+  let mut log_index = router.new_cluster(btreeset! {0,1,2}, btreeset! {}).await?;
 
-    let node = router.get_raft_handle(&0)?;
-    let server_metrics = node.server_metrics();
-    let data_metrics = node.data_metrics();
+  let node = router.get_raft_handle(&0)?;
+  let server_metrics = node.server_metrics();
+  let data_metrics = node.data_metrics();
 
-    let current_leader = router.current_leader(0).await;
-    let server_metrics_1 = {
-        let sm = server_metrics.borrow_watched();
-        sm.clone()
-    };
-    let leader = server_metrics_1.current_leader;
-    assert_eq!(leader, current_leader);
+  let current_leader = router.current_leader(0).await;
+  let server_metrics_1 = {
+    let sm = server_metrics.borrow_watched();
+    sm.clone()
+  };
+  let leader = server_metrics_1.current_leader;
+  assert_eq!(leader, current_leader);
 
-    let n = 10;
-    log_index += router.client_request_many(0, "foo", n).await?;
-    router
-        .wait(&0, timeout())
-        .applied_index(Some(log_index), "applied log index")
-        .await?;
+  let n = 10;
+  log_index += router.client_request_many(0, "foo", n).await?;
+  router
+    .wait(&0, timeout())
+    .applied_index(Some(log_index), "applied log index")
+    .await?;
 
-    let last_log_index = data_metrics
-        .borrow_watched()
-        .last_log
-        .map(|x| x.index())
-        .unwrap_or_default();
-    assert_eq!(last_log_index, log_index);
+  let last_log_index = data_metrics
+    .borrow_watched()
+    .last_log
+    .map(|x| x.index())
+    .unwrap_or_default();
+  assert_eq!(last_log_index, log_index);
 
-    let server_metrics_2 = server_metrics.borrow_watched().clone();
-    assert_eq!(
-        server_metrics_1, server_metrics_2,
-        "server metrics should not update on pure data write"
-    );
+  let server_metrics_2 = server_metrics.borrow_watched().clone();
+  assert_eq!(
+    server_metrics_1, server_metrics_2,
+    "server metrics should not update on pure data write"
+  );
 
-    Ok(())
+  Ok(())
 }
 
 /// 心跳指标 (heartbeat metrics) 监控测试
 #[compio::test]
 async fn test_heartbeat_metrics() -> Result<()> {
-    use zenoh_raft::testing::memstore::TypeConfig;
-    use zenoh_raft::type_config::TypeConfigExt;
+  use zenoh_raft::{testing::memstore::TypeConfig, type_config::TypeConfigExt};
 
-    let config = Arc::new(
-        Config {
-            enable_heartbeat: false,
-            heartbeat_interval: 50,
-            enable_elect: false,
-            ..Default::default()
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      heartbeat_interval: 50,
+      enable_elect: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config.clone());
+
+  let _log_index = router.new_cluster(btreeset! {0,1,2}, btreeset! {}).await?;
+  let leader = router.get_raft_handle(&0)?;
+
+  let now = TypeConfig::now();
+  leader.trigger().heartbeat().await?;
+
+  leader
+    .wait(timeout())
+    .metrics(
+      |metrics| {
+        let heartbeat = match metrics.heartbeat.as_ref() {
+          Some(h) => h,
+          None => return false,
+        };
+        let node1 = heartbeat.get(&1);
+        let node2 = heartbeat.get(&2);
+
+        match (node1, node2) {
+          (Some(Some(n1)), Some(Some(n2))) => (**n1 >= now) && (**n2 >= now),
+          _ => false,
         }
-        .validate()?,
-    );
-    let mut router = RaftRouter::new(config.clone());
+      },
+      "quorum acked heartbeat refreshed",
+    )
+    .await?;
 
-    let _log_index = router.new_cluster(btreeset! {0,1,2}, btreeset! {}).await?;
-    let leader = router.get_raft_handle(&0)?;
-
-    let now = TypeConfig::now();
-    leader.trigger().heartbeat().await?;
-
-    leader
-        .wait(timeout())
-        .metrics(
-            |metrics| {
-                let heartbeat = match metrics.heartbeat.as_ref() {
-                    Some(h) => h,
-                    None => return false,
-                };
-                let node1 = heartbeat.get(&1);
-                let node2 = heartbeat.get(&2);
-
-                match (node1, node2) {
-                    (Some(Some(n1)), Some(Some(n2))) => (**n1 >= now) && (**n2 >= now),
-                    _ => false,
-                }
-            },
-            "quorum acked heartbeat refreshed",
-        )
-        .await?;
-
-    Ok(())
+  Ok(())
 }
 
 /// 已提交成员配置 (committed_membership_config) 指标测试
 #[compio::test]
 async fn test_committed_membership_config() -> Result<()> {
-    use std::time::Duration;
-    use zenoh_raft::Membership;
-    use zenoh_raft::testing::memstore::TypeConfig;
+  use std::time::Duration;
 
-    let config = Arc::new(
-        Config {
-            enable_heartbeat: false,
-            enable_elect: false,
-            ..Default::default()
-        }
-        .validate()?,
+  use zenoh_raft::{Membership, testing::memstore::TypeConfig};
+
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_elect: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config.clone());
+
+  let _log_index = router.new_cluster(btreeset! {0,1}, btreeset! {}).await?;
+  let node = router.get_raft_handle(&0)?;
+
+  let old_membership = Membership::new_with_defaults(vec![btreeset! {0,1}], []);
+  let new_membership = Membership::new_with_defaults(vec![btreeset! {0,1}], [2]);
+
+  {
+    let metrics = node.metrics().borrow_watched().clone();
+    assert_eq!(
+      metrics.committed_membership_config,
+      metrics.membership_config
     );
-    let mut router = RaftRouter::new(config.clone());
+    assert_eq!(
+      &old_membership,
+      metrics.committed_membership_config.membership()
+    );
+  }
 
-    let _log_index = router.new_cluster(btreeset! {0,1}, btreeset! {}).await?;
-    let node = router.get_raft_handle(&0)?;
+  router.new_raft_node(2).await;
+  router.set_network_error(1, true);
 
-    let old_membership = Membership::new_with_defaults(vec![btreeset! {0,1}], []);
-    let new_membership = Membership::new_with_defaults(vec![btreeset! {0,1}], [2]);
+  let n0 = node.clone();
+  let add_learner_handle = TypeConfig::spawn(async move { n0.add_learner(2, (), false).await });
 
-    {
-        let metrics = node.metrics().borrow_watched().clone();
-        assert_eq!(
-            metrics.committed_membership_config,
-            metrics.membership_config
-        );
-        assert_eq!(
-            &old_membership,
-            metrics.committed_membership_config.membership()
-        );
-    }
+  {
+    let metrics = router
+      .wait(&0, Some(Duration::from_millis(3_000)))
+      .metrics(
+        |x| x.membership_config.membership() == &new_membership,
+        "the effective membership config contains the new learner",
+      )
+      .await?;
 
-    router.new_raft_node(2).await;
-    router.set_network_error(1, true);
+    assert_eq!(
+      &old_membership,
+      metrics.committed_membership_config.membership()
+    );
+    assert!(metrics.committed_membership_config.log_id() < metrics.membership_config.log_id());
+  }
 
-    let n0 = node.clone();
-    let add_learner_handle = TypeConfig::spawn(async move { n0.add_learner(2, (), false).await });
+  {
+    router.set_network_error(1, false);
+    add_learner_handle.await??;
 
-    {
-        let metrics = router
-            .wait(&0, Some(Duration::from_millis(3_000)))
-            .metrics(
-                |x| x.membership_config.membership() == &new_membership,
-                "the effective membership config contains the new learner",
-            )
-            .await?;
+    let metrics = router
+      .wait(&0, Some(Duration::from_millis(3_000)))
+      .metrics(
+        |x| x.committed_membership_config == x.membership_config,
+        "the committed membership config catches up with the effective one",
+      )
+      .await?;
+    assert_eq!(
+      &new_membership,
+      metrics.committed_membership_config.membership()
+    );
 
-        assert_eq!(
-            &old_membership,
-            metrics.committed_membership_config.membership()
-        );
-        assert!(metrics.committed_membership_config.log_id() < metrics.membership_config.log_id());
-    }
+    let server_metrics = node.server_metrics().borrow_watched().clone();
+    assert_eq!(
+      metrics.committed_membership_config,
+      server_metrics.committed_membership_config
+    );
+  }
 
-    {
-        router.set_network_error(1, false);
-        add_learner_handle.await??;
-
-        let metrics = router
-            .wait(&0, Some(Duration::from_millis(3_000)))
-            .metrics(
-                |x| x.committed_membership_config == x.membership_config,
-                "the committed membership config catches up with the effective one",
-            )
-            .await?;
-        assert_eq!(
-            &new_membership,
-            metrics.committed_membership_config.membership()
-        );
-
-        let server_metrics = node.server_metrics().borrow_watched().clone();
-        assert_eq!(
-            metrics.committed_membership_config,
-            server_metrics.committed_membership_config
-        );
-    }
-
-    Ok(())
+  Ok(())
 }
 
 /// cluster_committed 指标测试
 #[compio::test]
 async fn test_cluster_committed_metric() -> Result<()> {
-    let config = Arc::new(
-        Config {
-            enable_heartbeat: false,
-            enable_elect: false,
-            ..Default::default()
-        }
-        .validate()?,
-    );
-    let mut router = RaftRouter::new(config.clone());
-
-    let mut log_index = router.new_cluster(btreeset! {0,1,2}, btreeset! {}).await?;
-    log_index += router.client_request_many(0, "foo", 10).await?;
-
-    for id in [0, 1, 2] {
-        router
-            .wait(&id, timeout())
-            .applied_index(Some(log_index), "applied log index")
-            .await?;
-
-        let node = router.get_raft_handle(&id)?;
-        let metrics = node.metrics().borrow_watched().clone();
-        let data_metrics = node.data_metrics().borrow_watched().clone();
-
-        assert_eq!(
-            metrics.cluster_committed.as_ref().map(|x| x.index()),
-            Some(log_index),
-        );
-        assert_eq!(metrics.cluster_committed, metrics.local_committed);
-
-        assert_eq!(data_metrics.local_committed, metrics.local_committed);
-        assert_eq!(data_metrics.cluster_committed, metrics.cluster_committed);
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_elect: false,
+      ..Default::default()
     }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config.clone());
 
-    Ok(())
+  let mut log_index = router.new_cluster(btreeset! {0,1,2}, btreeset! {}).await?;
+  log_index += router.client_request_many(0, "foo", 10).await?;
+
+  for id in [0, 1, 2] {
+    router
+      .wait(&id, timeout())
+      .applied_index(Some(log_index), "applied log index")
+      .await?;
+
+    let node = router.get_raft_handle(&id)?;
+    let metrics = node.metrics().borrow_watched().clone();
+    let data_metrics = node.data_metrics().borrow_watched().clone();
+
+    assert_eq!(
+      metrics.cluster_committed.as_ref().map(|x| x.index()),
+      Some(log_index),
+    );
+    assert_eq!(metrics.cluster_committed, metrics.local_committed);
+
+    assert_eq!(data_metrics.local_committed, metrics.local_committed);
+    assert_eq!(data_metrics.cluster_committed, metrics.cluster_committed);
+  }
+
+  Ok(())
 }
 
 /// wait() 超时条件测试
 #[compio::test]
 async fn test_metrics_wait_timeout() -> Result<()> {
-    use std::time::Duration;
-    use zenoh_raft::metrics::WaitError;
+  use std::time::Duration;
 
-    let config = Arc::new(
-        Config {
-            enable_tick: false,
-            ..Default::default()
-        }
-        .validate()?,
-    );
-    let mut router = RaftRouter::new(config.clone());
+  use zenoh_raft::metrics::WaitError;
 
-    let log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
-    let never_written = log_index + 1;
-    let rst = router
-        .wait(&0, Some(Duration::from_millis(500)))
-        .applied_index(Some(never_written), "timeout waiting for log")
-        .await;
+  let config = Arc::new(
+    Config {
+      enable_tick: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config.clone());
 
-    assert!(matches!(rst, Err(WaitError::Timeout(..))));
+  let log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
+  let never_written = log_index + 1;
+  let rst = router
+    .wait(&0, Some(Duration::from_millis(500)))
+    .applied_index(Some(never_written), "timeout waiting for log")
+    .await;
 
-    Ok(())
+  assert!(matches!(rst, Err(WaitError::Timeout(..))));
+
+  Ok(())
 }
 
 /// on_cluster_leader_change API 测试
 #[compio::test]
 async fn test_on_cluster_leader_change_api() -> Result<()> {
-    use std::sync::Mutex;
-    use std::time::Duration;
-    use zenoh_raft::testing::memstore::TypeConfig;
-    use zenoh_raft::type_config::TypeConfigExt;
-    use zenoh_raft::vote::RaftLeaderId;
+  use std::{sync::Mutex, time::Duration};
 
-    let config = Arc::new(
-        Config {
-            enable_elect: false,
-            enable_heartbeat: false,
-            ..Default::default()
-        }
-        .validate()?,
-    );
-    let mut router = RaftRouter::new(config.clone());
+  use zenoh_raft::{testing::memstore::TypeConfig, type_config::TypeConfigExt, vote::RaftLeaderId};
 
-    let _log_index = router
-        .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
-        .await?;
-
-    let n1 = router.get_raft_handle(&1)?;
-    type LeaderChangeEvent = (Option<(u64, u64, bool)>, (u64, u64, bool));
-    let changes: Arc<Mutex<Vec<LeaderChangeEvent>>> = Arc::new(Mutex::new(Vec::new()));
-    let changes_clone = changes.clone();
-
-    let mut handle = n1.on_cluster_leader_change(move |old, new| {
-        let old_val =
-            old.map(|(leader_id, committed)| (leader_id.term(), *leader_id.node_id(), committed));
-        let new_val = (new.0.term(), *new.0.node_id(), new.1);
-        changes_clone.lock().unwrap().push((old_val, new_val));
-        async {}
-    });
-
-    TypeConfig::sleep(Duration::from_millis(100)).await;
-
-    {
-        let got = changes.lock().unwrap().clone();
-        let want = vec![(None, (1, 0, true))];
-        assert_eq!(got, want);
+  let config = Arc::new(
+    Config {
+      enable_elect: false,
+      enable_heartbeat: false,
+      ..Default::default()
     }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config.clone());
 
-    router.remove_node(0);
-    TypeConfig::sleep(Duration::from_millis(700)).await;
+  let _log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
 
-    let n2 = router.get_raft_handle(&2)?;
-    n2.trigger().elect(false).await?;
+  let n1 = router.get_raft_handle(&1)?;
+  type LeaderChangeEvent = (Option<(u64, u64, bool)>, (u64, u64, bool));
+  let changes: Arc<Mutex<Vec<LeaderChangeEvent>>> = Arc::new(Mutex::new(Vec::new()));
+  let changes_clone = changes.clone();
 
-    n2.wait(Some(Duration::from_millis(2000)))
-        .state(ServerState::Leader, "wait for node 2 to become leader")
-        .await?;
+  let mut handle = n1.on_cluster_leader_change(move |old, new| {
+    let old_val =
+      old.map(|(leader_id, committed)| (leader_id.term(), *leader_id.node_id(), committed));
+    let new_val = (new.0.term(), *new.0.node_id(), new.1);
+    changes_clone.lock().unwrap().push((old_val, new_val));
+    async {}
+  });
 
-    n1.wait(Some(Duration::from_millis(2000)))
-        .current_leader(2, "wait for node 1 to see node 2 as leader")
-        .await?;
+  TypeConfig::sleep(Duration::from_millis(100)).await;
 
-    TypeConfig::sleep(Duration::from_millis(100)).await;
+  {
+    let got = changes.lock().unwrap().clone();
+    let want = vec![(None, (1, 0, true))];
+    assert_eq!(got, want);
+  }
 
-    {
-        let got = changes.lock().unwrap().clone();
-        let want = vec![(None, (1, 0, true)), (Some((1, 0, true)), (2, 2, false))];
-        assert_eq!(got, want);
-    }
+  router.remove_node(0);
+  TypeConfig::sleep(Duration::from_millis(700)).await;
 
-    handle.close().await;
+  let n2 = router.get_raft_handle(&2)?;
+  n2.trigger().elect(false).await?;
 
-    Ok(())
+  n2.wait(Some(Duration::from_millis(2000)))
+    .state(ServerState::Leader, "wait for node 2 to become leader")
+    .await?;
+
+  n1.wait(Some(Duration::from_millis(2000)))
+    .current_leader(2, "wait for node 1 to see node 2 as leader")
+    .await?;
+
+  TypeConfig::sleep(Duration::from_millis(100)).await;
+
+  {
+    let got = changes.lock().unwrap().clone();
+    let want = vec![(None, (1, 0, true)), (Some((1, 0, true)), (2, 2, false))];
+    assert_eq!(got, want);
+  }
+
+  handle.close().await;
+
+  Ok(())
 }
 
 /// on_leader_change API 测试
 #[compio::test]
 async fn test_on_leader_change_api() -> Result<()> {
-    use std::sync::Mutex;
-    use std::time::Duration;
-    use zenoh_raft::testing::memstore::TypeConfig;
-    use zenoh_raft::type_config::TypeConfigExt;
-    use zenoh_raft::vote::RaftLeaderId;
+  use std::{sync::Mutex, time::Duration};
 
-    let config = Arc::new(
-        Config {
-            enable_elect: false,
-            enable_heartbeat: false,
-            ..Default::default()
-        }
-        .validate()?,
-    );
-    let mut router = RaftRouter::new(config.clone());
+  use zenoh_raft::{testing::memstore::TypeConfig, type_config::TypeConfigExt, vote::RaftLeaderId};
 
-    let _log_index = router
-        .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
-        .await?;
-
-    let n0 = router.get_raft_handle(&0)?;
-
-    let started: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
-    let stopped: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
-
-    let started_clone = started.clone();
-    let stopped_clone = stopped.clone();
-
-    let mut handle = n0.on_leader_change(
-        move |leader_id| {
-            started_clone
-                .lock()
-                .unwrap()
-                .push((leader_id.term(), *leader_id.node_id()));
-            async {}
-        },
-        move |old_leader_id| {
-            stopped_clone
-                .lock()
-                .unwrap()
-                .push((old_leader_id.term(), *old_leader_id.node_id()));
-            async {}
-        },
-    );
-
-    TypeConfig::sleep(Duration::from_millis(100)).await;
-
-    {
-        let got = started.lock().unwrap().clone();
-        assert_eq!(got, vec![(1, 0)]);
-
-        let got = stopped.lock().unwrap().clone();
-        assert_eq!(got, vec![]);
+  let config = Arc::new(
+    Config {
+      enable_elect: false,
+      enable_heartbeat: false,
+      ..Default::default()
     }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config.clone());
 
-    TypeConfig::sleep(Duration::from_millis(700)).await;
+  let _log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
 
-    let n2 = router.get_raft_handle(&2)?;
-    n2.trigger().elect(false).await?;
+  let n0 = router.get_raft_handle(&0)?;
 
-    n2.wait(Some(Duration::from_millis(2000)))
-        .state(ServerState::Leader, "wait for node 2 to become leader")
-        .await?;
+  let started: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+  let stopped: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
 
-    n0.wait(Some(Duration::from_millis(2000)))
-        .current_leader(2, "wait for node 0 to see node 2 as leader")
-        .await?;
+  let started_clone = started.clone();
+  let stopped_clone = stopped.clone();
 
-    TypeConfig::sleep(Duration::from_millis(100)).await;
+  let mut handle = n0.on_leader_change(
+    move |leader_id| {
+      started_clone
+        .lock()
+        .unwrap()
+        .push((leader_id.term(), *leader_id.node_id()));
+      async {}
+    },
+    move |old_leader_id| {
+      stopped_clone
+        .lock()
+        .unwrap()
+        .push((old_leader_id.term(), *old_leader_id.node_id()));
+      async {}
+    },
+  );
 
-    {
-        let got = started.lock().unwrap().clone();
-        assert_eq!(got, vec![(1, 0)]);
+  TypeConfig::sleep(Duration::from_millis(100)).await;
 
-        let got = stopped.lock().unwrap().clone();
-        assert_eq!(got, vec![(1, 0)]);
-    }
+  {
+    let got = started.lock().unwrap().clone();
+    assert_eq!(got, vec![(1, 0)]);
 
-    handle.close().await;
+    let got = stopped.lock().unwrap().clone();
+    assert_eq!(got, vec![]);
+  }
 
-    Ok(())
+  TypeConfig::sleep(Duration::from_millis(700)).await;
+
+  let n2 = router.get_raft_handle(&2)?;
+  n2.trigger().elect(false).await?;
+
+  n2.wait(Some(Duration::from_millis(2000)))
+    .state(ServerState::Leader, "wait for node 2 to become leader")
+    .await?;
+
+  n0.wait(Some(Duration::from_millis(2000)))
+    .current_leader(2, "wait for node 0 to see node 2 as leader")
+    .await?;
+
+  TypeConfig::sleep(Duration::from_millis(100)).await;
+
+  {
+    let got = started.lock().unwrap().clone();
+    assert_eq!(got, vec![(1, 0)]);
+
+    let got = stopped.lock().unwrap().clone();
+    assert_eq!(got, vec![(1, 0)]);
+  }
+
+  handle.close().await;
+
+  Ok(())
 }
 
 /// 确保 on_leader_change 的异步 Future 被正确 await
 #[compio::test]
 async fn test_on_leader_change_future_is_awaited() -> Result<()> {
-    use std::sync::atomic::AtomicU32;
-    use std::sync::atomic::Ordering;
-    use std::time::Duration;
-    use zenoh_raft::testing::memstore::TypeConfig;
-    use zenoh_raft::type_config::TypeConfigExt;
+  use std::{
+    sync::atomic::{AtomicU32, Ordering},
+    time::Duration,
+  };
 
-    let config = Arc::new(
-        Config {
-            enable_elect: false,
-            enable_heartbeat: false,
-            ..Default::default()
-        }
-        .validate()?,
-    );
-    let mut router = RaftRouter::new(config.clone());
+  use zenoh_raft::{testing::memstore::TypeConfig, type_config::TypeConfigExt};
 
-    let _log_index = router
-        .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
-        .await?;
-    let n0 = router.get_raft_handle(&0)?;
+  let config = Arc::new(
+    Config {
+      enable_elect: false,
+      enable_heartbeat: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config.clone());
 
-    let start_counter = Arc::new(AtomicU32::new(0));
-    let stop_counter = Arc::new(AtomicU32::new(0));
+  let _log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
+  let n0 = router.get_raft_handle(&0)?;
 
-    let start_counter_clone = start_counter.clone();
-    let stop_counter_clone = stop_counter.clone();
+  let start_counter = Arc::new(AtomicU32::new(0));
+  let stop_counter = Arc::new(AtomicU32::new(0));
 
-    let mut handle = n0.on_leader_change(
-        move |_leader_id| {
-            let counter = start_counter_clone.clone();
-            async move {
-                TypeConfig::yield_now().await;
-                counter.fetch_add(1, Ordering::SeqCst);
-            }
-        },
-        move |_old_leader_id| {
-            let counter = stop_counter_clone.clone();
-            async move {
-                TypeConfig::yield_now().await;
-                counter.fetch_add(1, Ordering::SeqCst);
-            }
-        },
-    );
+  let start_counter_clone = start_counter.clone();
+  let stop_counter_clone = stop_counter.clone();
 
-    TypeConfig::sleep(Duration::from_millis(100)).await;
+  let mut handle = n0.on_leader_change(
+    move |_leader_id| {
+      let counter = start_counter_clone.clone();
+      async move {
+        TypeConfig::yield_now().await;
+        counter.fetch_add(1, Ordering::SeqCst);
+      }
+    },
+    move |_old_leader_id| {
+      let counter = stop_counter_clone.clone();
+      async move {
+        TypeConfig::yield_now().await;
+        counter.fetch_add(1, Ordering::SeqCst);
+      }
+    },
+  );
 
-    assert_eq!(start_counter.load(Ordering::SeqCst), 1);
-    assert_eq!(stop_counter.load(Ordering::SeqCst), 0);
+  TypeConfig::sleep(Duration::from_millis(100)).await;
 
-    TypeConfig::sleep(Duration::from_millis(700)).await;
+  assert_eq!(start_counter.load(Ordering::SeqCst), 1);
+  assert_eq!(stop_counter.load(Ordering::SeqCst), 0);
 
-    let n2 = router.get_raft_handle(&2)?;
-    n2.trigger().elect(false).await?;
+  TypeConfig::sleep(Duration::from_millis(700)).await;
 
-    n2.wait(Some(Duration::from_millis(2000)))
-        .state(ServerState::Leader, "wait for node 2 to become leader")
-        .await?;
+  let n2 = router.get_raft_handle(&2)?;
+  n2.trigger().elect(false).await?;
 
-    n0.wait(Some(Duration::from_millis(2000)))
-        .current_leader(2, "wait for node 0 to see node 2 as leader")
-        .await?;
+  n2.wait(Some(Duration::from_millis(2000)))
+    .state(ServerState::Leader, "wait for node 2 to become leader")
+    .await?;
 
-    TypeConfig::sleep(Duration::from_millis(100)).await;
+  n0.wait(Some(Duration::from_millis(2000)))
+    .current_leader(2, "wait for node 0 to see node 2 as leader")
+    .await?;
 
-    assert_eq!(start_counter.load(Ordering::SeqCst), 1);
-    assert_eq!(stop_counter.load(Ordering::SeqCst), 1);
+  TypeConfig::sleep(Duration::from_millis(100)).await;
 
-    handle.close().await;
+  assert_eq!(start_counter.load(Ordering::SeqCst), 1);
+  assert_eq!(stop_counter.load(Ordering::SeqCst), 1);
 
-    Ok(())
+  handle.close().await;
+
+  Ok(())
 }
 
 /// 确保 on_cluster_leader_change 的异步 Future 被正确 await
 #[compio::test]
 async fn test_on_cluster_leader_change_future_is_awaited() -> Result<()> {
-    use std::sync::atomic::AtomicU32;
-    use std::sync::atomic::Ordering;
-    use std::time::Duration;
-    use zenoh_raft::testing::memstore::TypeConfig;
-    use zenoh_raft::type_config::TypeConfigExt;
+  use std::{
+    sync::atomic::{AtomicU32, Ordering},
+    time::Duration,
+  };
 
-    let config = Arc::new(
-        Config {
-            enable_elect: false,
-            enable_heartbeat: false,
-            ..Default::default()
-        }
-        .validate()?,
-    );
-    let mut router = RaftRouter::new(config.clone());
+  use zenoh_raft::{testing::memstore::TypeConfig, type_config::TypeConfigExt};
 
-    let _log_index = router
-        .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
-        .await?;
-    let n1 = router.get_raft_handle(&1)?;
+  let config = Arc::new(
+    Config {
+      enable_elect: false,
+      enable_heartbeat: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config.clone());
 
-    let callback_counter = Arc::new(AtomicU32::new(0));
-    let callback_counter_clone = callback_counter.clone();
+  let _log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
+  let n1 = router.get_raft_handle(&1)?;
 
-    let mut handle = n1.on_cluster_leader_change(move |_old, _new| {
-        let counter = callback_counter_clone.clone();
-        async move {
-            TypeConfig::yield_now().await;
-            counter.fetch_add(1, Ordering::SeqCst);
-        }
-    });
+  let callback_counter = Arc::new(AtomicU32::new(0));
+  let callback_counter_clone = callback_counter.clone();
 
-    TypeConfig::sleep(Duration::from_millis(100)).await;
+  let mut handle = n1.on_cluster_leader_change(move |_old, _new| {
+    let counter = callback_counter_clone.clone();
+    async move {
+      TypeConfig::yield_now().await;
+      counter.fetch_add(1, Ordering::SeqCst);
+    }
+  });
 
-    assert_eq!(callback_counter.load(Ordering::SeqCst), 1);
+  TypeConfig::sleep(Duration::from_millis(100)).await;
 
-    TypeConfig::sleep(Duration::from_millis(700)).await;
+  assert_eq!(callback_counter.load(Ordering::SeqCst), 1);
 
-    let n2 = router.get_raft_handle(&2)?;
-    n2.trigger().elect(false).await?;
+  TypeConfig::sleep(Duration::from_millis(700)).await;
 
-    n2.wait(Some(Duration::from_millis(2000)))
-        .state(ServerState::Leader, "wait for node 2 to become leader")
-        .await?;
+  let n2 = router.get_raft_handle(&2)?;
+  n2.trigger().elect(false).await?;
 
-    n1.wait(Some(Duration::from_millis(2000)))
-        .current_leader(2, "wait for node 1 to see node 2 as leader")
-        .await?;
+  n2.wait(Some(Duration::from_millis(2000)))
+    .state(ServerState::Leader, "wait for node 2 to become leader")
+    .await?;
 
-    TypeConfig::sleep(Duration::from_millis(100)).await;
+  n1.wait(Some(Duration::from_millis(2000)))
+    .current_leader(2, "wait for node 1 to see node 2 as leader")
+    .await?;
 
-    assert_eq!(callback_counter.load(Ordering::SeqCst), 2);
+  TypeConfig::sleep(Duration::from_millis(100)).await;
 
-    handle.close().await;
+  assert_eq!(callback_counter.load(Ordering::SeqCst), 2);
 
-    Ok(())
+  handle.close().await;
+
+  Ok(())
 }
 
 /// 应用进度监听 API (watch_apply_progress: get & wait_until_ge) 测试
 #[compio::test]
 async fn test_apply_progress_api() -> Result<()> {
-    use zenoh_raft::testing::memstore::TypeConfig;
-    use zenoh_raft::type_config::TypeConfigExt;
+  use zenoh_raft::{testing::memstore::TypeConfig, type_config::TypeConfigExt};
 
-    let config = Arc::new(
-        Config {
-            enable_tick: false,
-            ..Default::default()
-        }
-        .validate()?,
-    );
-    let mut router = RaftRouter::new(config.clone());
-    let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
+  let config = Arc::new(
+    Config {
+      enable_tick: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config.clone());
+  let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
 
-    let n0 = router.get_raft_handle(&0)?;
-    let progress = n0.watch_apply_progress();
+  let n0 = router.get_raft_handle(&0)?;
+  let progress = n0.watch_apply_progress();
 
-    let got = progress.get();
-    let want = Some(log_id(1, 0, log_index));
-    assert_eq!(got, want);
+  let got = progress.get();
+  let want = Some(log_id(1, 0, log_index));
+  assert_eq!(got, want);
 
-    let target_index = log_index + 5;
-    let target = Some(log_id(1, 0, target_index));
+  let target_index = log_index + 5;
+  let target = Some(log_id(1, 0, target_index));
 
-    let n0_clone = router.get_raft_handle(&0)?;
-    let handle = TypeConfig::spawn(async move {
-        let mut progress = n0_clone.watch_apply_progress();
-        progress.wait_until_ge(&target).await
-    });
+  let n0_clone = router.get_raft_handle(&0)?;
+  let handle = TypeConfig::spawn(async move {
+    let mut progress = n0_clone.watch_apply_progress();
+    progress.wait_until_ge(&target).await
+  });
 
-    log_index += router.client_request_many(0, "foo", 5).await?;
+  log_index += router.client_request_many(0, "foo", 5).await?;
 
-    let got_wait = handle.await??;
-    let got_get = progress.get();
+  let got_wait = handle.await??;
+  let got_get = progress.get();
 
-    let want = Some(log_id(1, 0, log_index));
-    assert_eq!(got_wait, want);
-    assert_eq!(got_get, want);
+  let want = Some(log_id(1, 0, log_index));
+  assert_eq!(got_wait, want);
+  assert_eq!(got_get, want);
 
-    Ok(())
+  Ok(())
 }
 
 /// 提交进度监听 API (watch_commit_progress: get & wait_until_ge) 测试
 #[compio::test]
 async fn test_commit_progress_api() -> Result<()> {
-    use zenoh_raft::testing::memstore::TypeConfig;
-    use zenoh_raft::type_config::TypeConfigExt;
+  use zenoh_raft::{testing::memstore::TypeConfig, type_config::TypeConfigExt};
 
-    let config = Arc::new(
-        Config {
-            enable_tick: false,
-            ..Default::default()
-        }
-        .validate()?,
-    );
-    let mut router = RaftRouter::new(config.clone());
-    let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
+  let config = Arc::new(
+    Config {
+      enable_tick: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config.clone());
+  let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
 
-    let n0 = router.get_raft_handle(&0)?;
-    let progress = n0.watch_commit_progress();
+  let n0 = router.get_raft_handle(&0)?;
+  let progress = n0.watch_commit_progress();
 
-    let got = progress.get();
-    let want = Some(log_id(1, 0, log_index));
-    assert_eq!(got, want);
+  let got = progress.get();
+  let want = Some(log_id(1, 0, log_index));
+  assert_eq!(got, want);
 
-    let target_index = log_index + 5;
-    let target = Some(log_id(1, 0, target_index));
+  let target_index = log_index + 5;
+  let target = Some(log_id(1, 0, target_index));
 
-    let n0_clone = router.get_raft_handle(&0)?;
-    let handle = TypeConfig::spawn(async move {
-        let mut progress = n0_clone.watch_commit_progress();
-        progress.wait_until_ge(&target).await
-    });
+  let n0_clone = router.get_raft_handle(&0)?;
+  let handle = TypeConfig::spawn(async move {
+    let mut progress = n0_clone.watch_commit_progress();
+    progress.wait_until_ge(&target).await
+  });
 
-    log_index += router.client_request_many(0, "foo", 5).await?;
+  log_index += router.client_request_many(0, "foo", 5).await?;
 
-    let got_wait = handle.await??;
-    let got_get = progress.get();
+  let got_wait = handle.await??;
+  let got_get = progress.get();
 
-    let want = Some(log_id(1, 0, log_index));
-    assert_eq!(got_wait, want);
-    assert_eq!(got_get, want);
+  let want = Some(log_id(1, 0, log_index));
+  assert_eq!(got_wait, want);
+  assert_eq!(got_get, want);
 
-    Ok(())
+  Ok(())
 }
 
 /// 日志进度监听 API (watch_log_progress: get & wait_until_ge) 测试
 #[compio::test]
 async fn test_log_progress_api() -> Result<()> {
-    use zenoh_raft::FlushPoint;
-    use zenoh_raft::Vote;
-    use zenoh_raft::testing::memstore::TypeConfig;
-    use zenoh_raft::type_config::TypeConfigExt;
+  use zenoh_raft::{FlushPoint, Vote, testing::memstore::TypeConfig, type_config::TypeConfigExt};
 
-    let config = Arc::new(
-        Config {
-            enable_tick: false,
-            ..Default::default()
-        }
-        .validate()?,
-    );
-    let mut router = RaftRouter::new(config.clone());
-    let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
+  let config = Arc::new(
+    Config {
+      enable_tick: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config.clone());
+  let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
 
-    let n0 = router.get_raft_handle(&0)?;
-    let log_progress = n0.watch_log_progress();
+  let n0 = router.get_raft_handle(&0)?;
+  let log_progress = n0.watch_log_progress();
 
-    let got = log_progress.get();
-    let want = Some(FlushPoint::new(
-        Vote::new_committed(1, 0),
-        Some(log_id(1, 0, log_index)),
-    ));
-    assert_eq!(got, want);
+  let got = log_progress.get();
+  let want = Some(FlushPoint::new(
+    Vote::new_committed(1, 0),
+    Some(log_id(1, 0, log_index)),
+  ));
+  assert_eq!(got, want);
 
-    let target_index = log_index + 5;
-    let target = Some(FlushPoint::new(
-        Vote::new_committed(1, 0),
-        Some(log_id(1, 0, target_index)),
-    ));
+  let target_index = log_index + 5;
+  let target = Some(FlushPoint::new(
+    Vote::new_committed(1, 0),
+    Some(log_id(1, 0, target_index)),
+  ));
 
-    let n0_clone = router.get_raft_handle(&0)?;
-    let handle = TypeConfig::spawn(async move {
-        let mut progress = n0_clone.watch_log_progress();
-        progress.wait_until_ge(&target).await
-    });
+  let n0_clone = router.get_raft_handle(&0)?;
+  let handle = TypeConfig::spawn(async move {
+    let mut progress = n0_clone.watch_log_progress();
+    progress.wait_until_ge(&target).await
+  });
 
-    log_index += router.client_request_many(0, "foo", 5).await?;
+  log_index += router.client_request_many(0, "foo", 5).await?;
 
-    let got_wait = handle.await??;
-    let got_get = log_progress.get();
+  let got_wait = handle.await??;
+  let got_get = log_progress.get();
 
-    let want = Some(FlushPoint::new(
-        Vote::new_committed(1, 0),
-        Some(log_id(1, 0, log_index)),
-    ));
-    assert_eq!(got_wait, want);
-    assert_eq!(got_get, want);
+  let want = Some(FlushPoint::new(
+    Vote::new_committed(1, 0),
+    Some(log_id(1, 0, log_index)),
+  ));
+  assert_eq!(got_wait, want);
+  assert_eq!(got_get, want);
 
-    Ok(())
+  Ok(())
 }
 
 /// 伴随 Leader 切换的日志进度监听测试
 #[compio::test]
 async fn test_log_progress_with_leader_change() -> Result<()> {
-    use std::time::Duration;
-    use zenoh_raft::FlushPoint;
-    use zenoh_raft::Vote;
-    use zenoh_raft::testing::memstore::TypeConfig;
-    use zenoh_raft::type_config::TypeConfigExt;
+  use std::time::Duration;
 
-    let config = Arc::new(
-        Config {
-            enable_tick: false,
-            ..Default::default()
-        }
-        .validate()?,
-    );
-    let mut router = RaftRouter::new(config.clone());
-    let mut log_index = router
-        .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
-        .await?;
+  use zenoh_raft::{FlushPoint, Vote, testing::memstore::TypeConfig, type_config::TypeConfigExt};
 
-    let n1 = router.get_raft_handle(&1)?;
-    let log_progress = n1.watch_log_progress();
+  let config = Arc::new(
+    Config {
+      enable_tick: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config.clone());
+  let mut log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
 
-    let got = log_progress.get();
-    let want = Some(FlushPoint::new(
-        Vote::new_committed(1, 0),
-        Some(log_id(1, 0, log_index)),
-    ));
-    assert_eq!(got, want);
+  let n1 = router.get_raft_handle(&1)?;
+  let log_progress = n1.watch_log_progress();
 
-    let target_index = log_index + 4;
-    let target = Some(FlushPoint::new(
-        Vote::new_committed(2, 1),
-        Some(log_id(2, 1, target_index)),
-    ));
+  let got = log_progress.get();
+  let want = Some(FlushPoint::new(
+    Vote::new_committed(1, 0),
+    Some(log_id(1, 0, log_index)),
+  ));
+  assert_eq!(got, want);
 
-    let n0 = router.get_raft_handle(&0)?;
-    n0.shutdown().await?;
+  let target_index = log_index + 4;
+  let target = Some(FlushPoint::new(
+    Vote::new_committed(2, 1),
+    Some(log_id(2, 1, target_index)),
+  ));
 
-    TypeConfig::sleep(Duration::from_millis(500)).await;
+  let n0 = router.get_raft_handle(&0)?;
+  n0.shutdown().await?;
 
-    let n1_clone = router.get_raft_handle(&1)?;
-    let handle = TypeConfig::spawn(async move {
-        let mut progress = n1_clone.watch_log_progress();
-        progress.wait_until_ge(&target).await
-    });
+  TypeConfig::sleep(Duration::from_millis(500)).await;
 
-    router.remove_node(0);
+  let n1_clone = router.get_raft_handle(&1)?;
+  let handle = TypeConfig::spawn(async move {
+    let mut progress = n1_clone.watch_log_progress();
+    progress.wait_until_ge(&target).await
+  });
 
-    let n1 = router.get_raft_handle(&1)?;
-    n1.trigger().elect(false).await?;
+  router.remove_node(0);
 
-    router
-        .wait(&1, Some(Duration::from_millis(2000)))
-        .leader_with_quorum_acked(None, "wait for node 1 leader")
-        .await?;
-    log_index += 1;
-    log_index += router.client_request_many(1, "foo", 3).await?;
+  let n1 = router.get_raft_handle(&1)?;
+  n1.trigger().elect(false).await?;
 
-    let got_wait = handle.await??;
-    let got_get = log_progress.get();
+  router
+    .wait(&1, Some(Duration::from_millis(2000)))
+    .leader_with_quorum_acked(None, "wait for node 1 leader")
+    .await?;
+  log_index += 1;
+  log_index += router.client_request_many(1, "foo", 3).await?;
 
-    let want = Some(FlushPoint::new(
-        Vote::new_committed(2, 1),
-        Some(log_id(2, 1, log_index)),
-    ));
-    assert_eq!(got_wait, want);
-    assert_eq!(got_get, want);
+  let got_wait = handle.await??;
+  let got_get = log_progress.get();
 
-    Ok(())
+  let want = Some(FlushPoint::new(
+    Vote::new_committed(2, 1),
+    Some(log_id(2, 1, log_index)),
+  ));
+  assert_eq!(got_wait, want);
+  assert_eq!(got_get, want);
+
+  Ok(())
 }
 
 /// 投票进度监听 API (watch_vote_progress: get & wait_until_ge) 测试
 #[compio::test]
 async fn test_vote_progress_api() -> Result<()> {
-    use std::time::Duration;
-    use zenoh_raft::Vote;
-    use zenoh_raft::testing::memstore::TypeConfig;
-    use zenoh_raft::type_config::TypeConfigExt;
+  use std::time::Duration;
 
-    let config = Arc::new(
-        Config {
-            enable_tick: false,
-            enable_heartbeat: false,
-            ..Default::default()
-        }
-        .validate()?,
-    );
-    let mut router = RaftRouter::new(config.clone());
-    let _log_index = router
-        .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
-        .await?;
+  use zenoh_raft::{Vote, testing::memstore::TypeConfig, type_config::TypeConfigExt};
 
-    let n1 = router.get_raft_handle(&1)?;
-    let vote_progress = n1.watch_vote_progress();
+  let config = Arc::new(
+    Config {
+      enable_tick: false,
+      enable_heartbeat: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config.clone());
+  let _log_index = router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
 
-    let got = vote_progress.get();
-    let want = Some(Vote::new_committed(1, 0));
-    assert_eq!(got, want);
+  let n1 = router.get_raft_handle(&1)?;
+  let vote_progress = n1.watch_vote_progress();
 
-    let n0 = router.get_raft_handle(&0)?;
-    n0.shutdown().await?;
+  let got = vote_progress.get();
+  let want = Some(Vote::new_committed(1, 0));
+  assert_eq!(got, want);
 
-    TypeConfig::sleep(Duration::from_millis(500)).await;
+  let n0 = router.get_raft_handle(&0)?;
+  n0.shutdown().await?;
 
-    let n1 = router.get_raft_handle(&1)?;
-    let handle = TypeConfig::spawn(async move {
-        let mut progress = n1.watch_vote_progress();
-        let target = Some(Vote::new(2, 1));
-        progress.wait_until_ge(&target).await
-    });
+  TypeConfig::sleep(Duration::from_millis(500)).await;
 
-    let n1 = router.get_raft_handle(&1)?;
-    n1.trigger().elect(false).await?;
+  let n1 = router.get_raft_handle(&1)?;
+  let handle = TypeConfig::spawn(async move {
+    let mut progress = n1.watch_vote_progress();
+    let target = Some(Vote::new(2, 1));
+    progress.wait_until_ge(&target).await
+  });
 
-    let got_wait = handle.await??;
-    let got_get = vote_progress.get();
+  let n1 = router.get_raft_handle(&1)?;
+  n1.trigger().elect(false).await?;
 
-    let want = Some(Vote::new(2, 1));
-    assert_eq!(got_wait, want);
-    assert!(got_get == want || got_get == Some(Vote::new_committed(2, 1)));
+  let got_wait = handle.await??;
+  let got_get = vote_progress.get();
 
-    Ok(())
+  let want = Some(Vote::new(2, 1));
+  assert_eq!(got_wait, want);
+  assert!(got_get == want || got_get == Some(Vote::new_committed(2, 1)));
+
+  Ok(())
 }
 
 /// 快照进度监听 API (watch_snapshot_progress: get & wait_until_ge) 测试
 #[compio::test]
 async fn test_snapshot_progress_api() -> Result<()> {
-    use zenoh_raft::testing::memstore::TypeConfig;
-    use zenoh_raft::type_config::TypeConfigExt;
+  use zenoh_raft::{testing::memstore::TypeConfig, type_config::TypeConfigExt};
 
-    let config = Arc::new(
-        Config {
-            enable_tick: false,
-            ..Default::default()
-        }
-        .validate()?,
-    );
-    let mut router = RaftRouter::new(config.clone());
-    let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
+  let config = Arc::new(
+    Config {
+      enable_tick: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+  let mut router = RaftRouter::new(config.clone());
+  let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
 
-    let n0 = router.get_raft_handle(&0)?;
-    let progress = n0.watch_snapshot_progress();
+  let n0 = router.get_raft_handle(&0)?;
+  let progress = n0.watch_snapshot_progress();
 
-    let got = progress.get();
-    assert_eq!(got, None);
+  let got = progress.get();
+  assert_eq!(got, None);
 
-    log_index += router.client_request_many(0, "foo", 5).await?;
+  log_index += router.client_request_many(0, "foo", 5).await?;
 
-    let target = Some(log_id(1, 0, log_index));
+  let target = Some(log_id(1, 0, log_index));
 
-    let n0_clone = router.get_raft_handle(&0)?;
-    let handle = TypeConfig::spawn(async move {
-        let mut progress = n0_clone.watch_snapshot_progress();
-        progress.wait_until_ge(&target).await
-    });
+  let n0_clone = router.get_raft_handle(&0)?;
+  let handle = TypeConfig::spawn(async move {
+    let mut progress = n0_clone.watch_snapshot_progress();
+    progress.wait_until_ge(&target).await
+  });
 
-    n0.trigger().snapshot().await?;
+  n0.trigger().snapshot().await?;
 
-    let got_wait = handle.await??;
-    let got_get = progress.get();
+  let got_wait = handle.await??;
+  let got_get = progress.get();
 
-    let want = Some(log_id(1, 0, log_index));
-    assert_eq!(got_wait, want);
-    assert_eq!(got_get, want);
+  let want = Some(log_id(1, 0, log_index));
+  assert_eq!(got_wait, want);
+  assert_eq!(got_get, want);
 
-    Ok(())
+  Ok(())
 }

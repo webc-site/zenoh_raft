@@ -33,12 +33,13 @@ pub(crate) mod ref_vote;
 mod vote_impl;
 pub(crate) mod vote_status;
 
-pub use leader_id::raft_committed_leader_id::RaftCommittedLeaderId;
-pub use leader_id::raft_leader_id::RaftLeaderId;
+pub use leader_id::{
+  raft_committed_leader_id::RaftCommittedLeaderId, raft_leader_id::RaftLeaderId,
+};
 pub use raft_term::RaftTerm;
 pub use raft_vote::RaftVote;
 
-pub use self::leader_id::leader_id_adv;
-pub use self::leader_id::leader_id_cmp::LeaderIdCompare;
-pub use self::leader_id::leader_id_std;
-pub use self::vote_impl::Vote;
+pub use self::{
+  leader_id::{leader_id_adv, leader_id_cmp::LeaderIdCompare, leader_id_std},
+  vote_impl::Vote,
+};

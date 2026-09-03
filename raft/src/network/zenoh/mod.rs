@@ -5,9 +5,6 @@ pub mod config;
 pub mod server;
 pub mod wire;
 
-pub use client::ZenohNetwork;
-pub use client::ZenohNetworkFactory;
-pub use config::ZenohNetworkConfig;
-pub use config::ZenohSessionBuilder;
-pub use config::ZenohTlsConfig;
+pub use client::{ZenohNetwork, ZenohNetworkFactory};
+pub use config::{ZenohNetworkConfig, ZenohSessionBuilder, ZenohTlsConfig};
 pub use server::ZenohRaftServer;

@@ -2,154 +2,153 @@ use std::fmt;
 
 use display_more::DisplayOptionExt;
 
-use crate::RaftTypeConfig;
-use crate::base::shared_id_generator::SharedIdGenerator;
-use crate::display_ext::DisplayInstantExt;
-use crate::engine::leader_log_ids::LeaderLogIds;
-use crate::progress::VecProgress;
-use crate::progress::id_val::IdVal;
-use crate::proposer::Leader;
-use crate::quorum::QuorumSet;
-use crate::type_config::alias::InstantOf;
-use crate::type_config::alias::LogIdOf;
-use crate::type_config::alias::VoteOf;
-use crate::vote::RaftVote;
-use crate::vote::raft_vote::RaftVoteExt;
+use crate::{
+  RaftTypeConfig,
+  base::shared_id_generator::SharedIdGenerator,
+  display_ext::DisplayInstantExt,
+  engine::leader_log_ids::LeaderLogIds,
+  progress::{VecProgress, id_val::IdVal},
+  proposer::Leader,
+  quorum::QuorumSet,
+  type_config::alias::{InstantOf, LogIdOf, VoteOf},
+  vote::{RaftVote, raft_vote::RaftVoteExt},
+};
 
 /// Candidate: voting state.
 #[derive(Clone, Debug)]
 pub(crate) struct Candidate<C, QS>
 where
-    C: RaftTypeConfig,
-    QS: QuorumSet<Id = C::NodeId>,
+  C: RaftTypeConfig,
+  QS: QuorumSet<Id = C::NodeId>,
 {
-    /// When the voting is started.
-    starting_time: InstantOf<C>,
+  /// When the voting is started.
+  starting_time: InstantOf<C>,
 
-    /// The vote.
-    vote: VoteOf<C>,
+  /// The vote.
+  vote: VoteOf<C>,
 
-    last_log_id: Option<LogIdOf<C>>,
+  last_log_id: Option<LogIdOf<C>>,
 
-    /// Which nodes have granted the vote at certain time point.
-    progress: VecProgress<IdVal<C::NodeId, bool>, QS>,
+  /// Which nodes have granted the vote at certain time point.
+  progress: VecProgress<IdVal<C::NodeId, bool>, QS>,
 
-    quorum_set: QS,
+  quorum_set: QS,
 
-    learner_ids: Vec<C::NodeId>,
+  learner_ids: Vec<C::NodeId>,
 
-    progress_id_gen: SharedIdGenerator,
+  progress_id_gen: SharedIdGenerator,
 }
 
 impl<C, QS> fmt::Display for Candidate<C, QS>
 where
-    C: RaftTypeConfig,
-    QS: QuorumSet<Id = C::NodeId> + fmt::Debug + 'static,
+  C: RaftTypeConfig,
+  QS: QuorumSet<Id = C::NodeId> + fmt::Debug + 'static,
 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{{{}@{}, last_log_id:{} progress:{}}}",
-            self.vote,
-            self.starting_time.display(),
-            self.last_log_id.display(),
-            self.progress
-        )
-    }
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(
+      f,
+      "{{{}@{}, last_log_id:{} progress:{}}}",
+      self.vote,
+      self.starting_time.display(),
+      self.last_log_id.display(),
+      self.progress
+    )
+  }
 }
 
 impl<C, QS> Candidate<C, QS>
 where
-    C: RaftTypeConfig,
-    QS: QuorumSet<Id = C::NodeId> + fmt::Debug + Clone + 'static,
+  C: RaftTypeConfig,
+  QS: QuorumSet<Id = C::NodeId> + fmt::Debug + Clone + 'static,
 {
-    pub(crate) fn new(
-        starting_time: InstantOf<C>,
-        vote: VoteOf<C>,
-        last_log_id: Option<LogIdOf<C>>,
-        quorum_set: QS,
-        learner_ids: impl IntoIterator<Item = C::NodeId>,
-        progress_id_gen: SharedIdGenerator,
-    ) -> Self {
-        Self {
-            starting_time,
-            vote,
-            last_log_id,
-            progress: VecProgress::new(quorum_set.clone(), [], IdVal::new_default),
-            quorum_set,
-            learner_ids: learner_ids.into_iter().collect::<Vec<_>>(),
-            progress_id_gen,
-        }
+  pub(crate) fn new(
+    starting_time: InstantOf<C>,
+    vote: VoteOf<C>,
+    last_log_id: Option<LogIdOf<C>>,
+    quorum_set: QS,
+    learner_ids: impl IntoIterator<Item = C::NodeId>,
+    progress_id_gen: SharedIdGenerator,
+  ) -> Self {
+    Self {
+      starting_time,
+      vote,
+      last_log_id,
+      progress: VecProgress::new(quorum_set.clone(), [], IdVal::new_default),
+      quorum_set,
+      learner_ids: learner_ids.into_iter().collect::<Vec<_>>(),
+      progress_id_gen,
     }
+  }
 
-    pub(crate) fn vote_ref(&self) -> &VoteOf<C> {
-        &self.vote
-    }
+  pub(crate) fn vote_ref(&self) -> &VoteOf<C> {
+    &self.vote
+  }
 
-    pub(crate) fn last_log_id(&self) -> Option<&LogIdOf<C>> {
-        self.last_log_id.as_ref()
-    }
+  pub(crate) fn last_log_id(&self) -> Option<&LogIdOf<C>> {
+    self.last_log_id.as_ref()
+  }
 
-    /// The time at which this voting round started.
-    ///
-    /// Used to rate-limit Pre-Vote retries: a fresh round already in flight should not be restarted
-    /// on every tick.
-    pub(crate) fn starting_time(&self) -> InstantOf<C> {
-        self.starting_time
-    }
+  /// The time at which this voting round started.
+  ///
+  /// Used to rate-limit Pre-Vote retries: a fresh round already in flight should not be restarted
+  /// on every tick.
+  pub(crate) fn starting_time(&self) -> InstantOf<C> {
+    self.starting_time
+  }
 
-    /// Grant the vote by a node.
-    pub(crate) fn grant_by(&mut self, target: &C::NodeId) -> bool {
-        let Ok(granted) = self.progress.update(target, true) else {
-            log::warn!(
-                "{}: ignore vote from target not in quorum set: {}",
-                func_name!(),
-                target
-            );
-            return false;
-        };
-        let granted = *granted;
+  /// Grant the vote by a node.
+  pub(crate) fn grant_by(&mut self, target: &C::NodeId) -> bool {
+    let Ok(granted) = self.progress.update(target, true) else {
+      log::warn!(
+        "{}: ignore vote from target not in quorum set: {}",
+        func_name!(),
+        target
+      );
+      return false;
+    };
+    let granted = *granted;
 
-        log::info!("{}: voting: {}", func_name!(), self);
+    log::info!("{}: voting: {}", func_name!(), self);
 
-        granted
-    }
+    granted
+  }
 
-    pub(crate) fn into_leader(self) -> Leader<C, QS> {
-        // Mark the vote as committed, i.e., being granted and saved by a quorum.
-        let vote = {
-            let vote = self.vote_ref().clone();
-            debug_assert!(!vote.is_committed());
-            vote.to_committed()
-        };
+  pub(crate) fn into_leader(self) -> Leader<C, QS> {
+    // Mark the vote as committed, i.e., being granted and saved by a quorum.
+    let vote = {
+      let vote = self.vote_ref().clone();
+      debug_assert!(!vote.is_committed());
+      vote.to_committed()
+    };
 
-        // TODO: tricky: the new LeaderId is different from the last log id
-        //       Thus only the last().index is used.
-        //       Thus the first() is ignored.
-        //       But we should not fake the first() there.
-        let last = self.last_log_id();
-        let last_leader_log_ids = last.cloned().map(LeaderLogIds::new_single);
+    // TODO: tricky: the new LeaderId is different from the last log id
+    //       Thus only the last().index is used.
+    //       Thus the first() is ignored.
+    //       But we should not fake the first() there.
+    let last = self.last_log_id();
+    let last_leader_log_ids = last.cloned().map(LeaderLogIds::new_single);
 
-        Leader::new(
-            vote,
-            self.quorum_set.clone(),
-            self.learner_ids,
-            last_leader_log_ids, // already Option<LeaderLogIds>
-            self.progress_id_gen,
-        )
-    }
+    Leader::new(
+      vote,
+      self.quorum_set.clone(),
+      self.learner_ids,
+      last_leader_log_ids, // already Option<LeaderLogIds>
+      self.progress_id_gen,
+    )
+  }
 }
 
 #[cfg(test)]
 impl<C, QS> Candidate<C, QS>
 where
-    C: RaftTypeConfig,
-    QS: QuorumSet<Id = C::NodeId> + fmt::Debug + Clone + 'static,
+  C: RaftTypeConfig,
+  QS: QuorumSet<Id = C::NodeId> + fmt::Debug + Clone + 'static,
 {
-    pub(crate) fn granters(&self) -> impl Iterator<Item = C::NodeId> + '_ {
-        self.progress
-            .iter()
-            .filter(|item| item.val)
-            .map(|item| item.id.clone())
-    }
+  pub(crate) fn granters(&self) -> impl Iterator<Item = C::NodeId> + '_ {
+    self
+      .progress
+      .iter()
+      .filter(|item| item.val)
+      .map(|item| item.id.clone())
+  }
 }

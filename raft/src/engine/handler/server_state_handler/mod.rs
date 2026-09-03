@@ -1,7 +1,4 @@
-use crate::RaftState;
-use crate::RaftTypeConfig;
-use crate::ServerState;
-use crate::engine::EngineConfig;
+use crate::{RaftState, RaftTypeConfig, ServerState, engine::EngineConfig};
 
 #[cfg(test)]
 mod update_server_state_test;
@@ -9,47 +6,47 @@ mod update_server_state_test;
 /// Handle raft server-state related operations
 pub(crate) struct ServerStateHandler<'st, C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    pub(crate) config: &'st EngineConfig<C>,
-    pub(crate) state: &'st mut RaftState<C>,
+  pub(crate) config: &'st EngineConfig<C>,
+  pub(crate) state: &'st mut RaftState<C>,
 }
 
 impl<'st, C> ServerStateHandler<'st, C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    pub(crate) fn new(config: &'st EngineConfig<C>, state: &'st mut RaftState<C>) -> Self {
-        Self { config, state }
+  pub(crate) fn new(config: &'st EngineConfig<C>, state: &'st mut RaftState<C>) -> Self {
+    Self { config, state }
+  }
+
+  /// Re-calculate the server-state if it changed, update the `server_state` field and dispatch
+  /// commands to inform a runtime.
+  pub(crate) fn update_server_state_if_changed(&mut self) {
+    let server_state = self.state.calc_server_state(&self.config.id);
+
+    log::debug!(
+      "check server state: id: {}, prev: {:?}, curr: {:?}",
+      self.config.id,
+      self.state.server_state,
+      server_state
+    );
+
+    if self.state.server_state == server_state {
+      return;
     }
 
-    /// Re-calculate the server-state if it changed, update the `server_state` field and dispatch
-    /// commands to inform a runtime.
-    pub(crate) fn update_server_state_if_changed(&mut self) {
-        let server_state = self.state.calc_server_state(&self.config.id);
+    let was_leader = self.state.server_state == ServerState::Leader;
+    let is_leader = server_state == ServerState::Leader;
 
-        log::debug!(
-            "check server state: id: {}, prev: {:?}, curr: {:?}",
-            self.config.id,
-            self.state.server_state,
-            server_state
-        );
-
-        if self.state.server_state == server_state {
-            return;
-        }
-
-        let was_leader = self.state.server_state == ServerState::Leader;
-        let is_leader = server_state == ServerState::Leader;
-
-        if !was_leader && is_leader {
-            log::info!("id={} becomes leader", self.config.id);
-        } else if was_leader && !is_leader {
-            log::info!("id={} steps down from leader", self.config.id);
-        } else {
-            // nothing to do
-        }
-
-        self.state.server_state = server_state;
+    if !was_leader && is_leader {
+      log::info!("id={} becomes leader", self.config.id);
+    } else if was_leader && !is_leader {
+      log::info!("id={} steps down from leader", self.config.id);
+    } else {
+      // nothing to do
     }
+
+    self.state.server_state = server_state;
+  }
 }

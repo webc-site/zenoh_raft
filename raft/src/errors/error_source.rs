@@ -1,12 +1,10 @@
 //! Configurable error source trait for wrapping arbitrary errors.
 
-use std::error::Error;
-use std::fmt;
+use std::{error::Error, fmt};
 
 use anyerror::AnyError;
 
-use crate::OptionalSend;
-use crate::OptionalSync;
+use crate::{OptionalSend, OptionalSync};
 
 /// Trait for configurable error wrapper types.
 ///
@@ -47,64 +45,64 @@ use crate::OptionalSync;
 /// }
 /// ```
 pub trait ErrorSource:
-    Error + Clone + PartialEq + Eq + OptionalSend + OptionalSync + 'static
+  Error + Clone + PartialEq + Eq + OptionalSend + OptionalSync + 'static
 {
-    /// Create an error from any error type implementing [`Error`].
-    fn from_error<E: Error + 'static>(error: &E) -> Self;
+  /// Create an error from any error type implementing [`Error`].
+  fn from_error<E: Error + 'static>(error: &E) -> Self;
 
-    /// Create an error from a string message.
-    fn from_string(msg: impl ToString) -> Self;
+  /// Create an error from a string message.
+  fn from_string(msg: impl ToString) -> Self;
 
-    /// Returns `true` if a backtrace is available.
-    ///
-    /// The default implementation returns `false`.
-    fn has_backtrace(&self) -> bool {
-        false
-    }
+  /// Returns `true` if a backtrace is available.
+  ///
+  /// The default implementation returns `false`.
+  fn has_backtrace(&self) -> bool {
+    false
+  }
 
-    /// Formats the backtrace to the given formatter.
-    ///
-    /// This method writes directly to a [`Formatter`](fmt::Formatter) instead of
-    /// returning `impl Display`, to avoid allocation and to keep this method
-    /// object-safe (enabling `dyn ErrorSource` if other constraints are removed).
-    ///
-    /// The default implementation does nothing.
-    fn fmt_backtrace(&self, _: &mut fmt::Formatter<'_>) -> fmt::Result {
-        Ok(())
-    }
+  /// Formats the backtrace to the given formatter.
+  ///
+  /// This method writes directly to a [`Formatter`](fmt::Formatter) instead of
+  /// returning `impl Display`, to avoid allocation and to keep this method
+  /// object-safe (enabling `dyn ErrorSource` if other constraints are removed).
+  ///
+  /// The default implementation does nothing.
+  fn fmt_backtrace(&self, _: &mut fmt::Formatter<'_>) -> fmt::Result {
+    Ok(())
+  }
 }
 
 impl ErrorSource for AnyError {
-    fn from_error<E: Error + 'static>(error: &E) -> Self {
-        AnyError::new(error)
-    }
+  fn from_error<E: Error + 'static>(error: &E) -> Self {
+    AnyError::new(error)
+  }
 
-    fn from_string(msg: impl ToString) -> Self {
-        AnyError::error(msg)
-    }
+  fn from_string(msg: impl ToString) -> Self {
+    AnyError::error(msg)
+  }
 
-    fn has_backtrace(&self) -> bool {
-        anyerror::backtrace_str().is_some()
-    }
+  fn has_backtrace(&self) -> bool {
+    anyerror::backtrace_str().is_some()
+  }
 
-    fn fmt_backtrace(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(bt) = anyerror::backtrace_str() {
-            write!(f, "{}", bt)
-        } else {
-            Ok(())
-        }
+  fn fmt_backtrace(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    if let Some(bt) = anyerror::backtrace_str() {
+      write!(f, "{}", bt)
+    } else {
+      Ok(())
     }
+  }
 }
 
 /// A wrapper that implements [`Display`](fmt::Display) for formatting backtraces.
 pub struct BacktraceDisplay<'a, E: ErrorSource>(pub &'a E);
 
 impl<E: ErrorSource> fmt::Display for BacktraceDisplay<'_, E> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.0.has_backtrace() {
-            self.0.fmt_backtrace(f)
-        } else {
-            Ok(())
-        }
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    if self.0.has_backtrace() {
+      self.0.fmt_backtrace(f)
+    } else {
+      Ok(())
     }
+  }
 }

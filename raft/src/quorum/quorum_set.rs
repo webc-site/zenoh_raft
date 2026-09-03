@@ -7,27 +7,27 @@ use std::sync::Arc;
 ///
 /// Implementations must be upward-closed: adding more IDs to a quorum must still be a quorum.
 pub trait QuorumSet {
-    type Id: 'static;
+  type Id: 'static;
 
-    type Iter: Iterator<Item = Self::Id>;
+  type Iter: Iterator<Item = Self::Id>;
 
-    /// Check if a series of ID constitute a quorum that is defined by this quorum set.
-    fn is_quorum<'a, I: Iterator<Item = &'a Self::Id> + Clone>(&self, ids: I) -> bool;
+  /// Check if a series of ID constitute a quorum that is defined by this quorum set.
+  fn is_quorum<'a, I: Iterator<Item = &'a Self::Id> + Clone>(&self, ids: I) -> bool;
 
-    /// Returns all ids in this QuorumSet
-    fn ids(&self) -> Self::Iter;
+  /// Returns all ids in this QuorumSet
+  fn ids(&self) -> Self::Iter;
 }
 
 impl<T: QuorumSet> QuorumSet for Arc<T> {
-    type Id = T::Id;
+  type Id = T::Id;
 
-    type Iter = T::Iter;
+  type Iter = T::Iter;
 
-    fn is_quorum<'a, I: Iterator<Item = &'a Self::Id> + Clone>(&self, ids: I) -> bool {
-        self.as_ref().is_quorum(ids)
-    }
+  fn is_quorum<'a, I: Iterator<Item = &'a Self::Id> + Clone>(&self, ids: I) -> bool {
+    self.as_ref().is_quorum(ids)
+  }
 
-    fn ids(&self) -> Self::Iter {
-        self.as_ref().ids()
-    }
+  fn ids(&self) -> Self::Iter {
+    self.as_ref().ids()
+  }
 }

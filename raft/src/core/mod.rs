@@ -44,14 +44,11 @@ mod tick;
 
 pub(crate) use client_responder_queue::ClientResponderQueue;
 pub(crate) use io_broadcast::IoBroadcast;
-pub(crate) use linearizable_read::PendingRead;
-pub(crate) use linearizable_read::PendingReadDeadlineNotifier;
-pub(crate) use linearizable_read::PendingReadQueue;
+pub(crate) use linearizable_read::{PendingRead, PendingReadDeadlineNotifier, PendingReadQueue};
 pub(crate) use metrics_channels::MetricsChannels;
 pub(crate) use raft_core::ApplyResult;
 pub use raft_core::RaftCore;
 pub(crate) use replication_state::replication_lag;
 pub use server_state::ServerState;
 pub(crate) use step_down_watcher::StepDownWatcher;
-pub(crate) use tick::Tick;
-pub(crate) use tick::TickHandle;
+pub(crate) use tick::{Tick, TickHandle};

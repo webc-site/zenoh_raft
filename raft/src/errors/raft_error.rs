@@ -2,12 +2,10 @@ use std::fmt::Debug;
 
 use peel_off::Peel;
 
-use crate::RaftTypeConfig;
-use crate::StorageError;
-use crate::errors::Fatal;
-use crate::errors::ForwardToLeader;
-use crate::errors::ForwardToLeaderRef;
-use crate::errors::Infallible;
+use crate::{
+  RaftTypeConfig, StorageError,
+  errors::{Fatal, ForwardToLeader, ForwardToLeaderRef, Infallible},
+};
 
 /// Error returned by Raft API methods.
 ///
@@ -36,120 +34,120 @@ use crate::errors::Infallible;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RaftError<C, E = Infallible>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    /// API-specific error returned by Raft API methods.
-    #[error(transparent)]
-    APIError(E),
+  /// API-specific error returned by Raft API methods.
+  #[error(transparent)]
+  APIError(E),
 
-    /// Fatal error indicating the Raft node has stopped.
-    #[error(transparent)]
-    Fatal(#[from] Fatal<C>),
+  /// Fatal error indicating the Raft node has stopped.
+  #[error(transparent)]
+  Fatal(#[from] Fatal<C>),
 }
 
 impl<C> RaftError<C, Infallible>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    /// Convert to a [`Fatal`] error if its `APIError` variant is [`Infallible`],
-    /// otherwise panic.
-    pub fn unwrap_fatal(self) -> Fatal<C> {
-        self.into_fatal().unwrap()
-    }
+  /// Convert to a [`Fatal`] error if its `APIError` variant is [`Infallible`],
+  /// otherwise panic.
+  pub fn unwrap_fatal(self) -> Fatal<C> {
+    self.into_fatal().unwrap()
+  }
 }
 
 impl<C, E> RaftError<C, E>
 where
-    C: RaftTypeConfig,
-    E: Debug,
+  C: RaftTypeConfig,
+  E: Debug,
 {
-    /// Return a reference to Self::APIError.
-    pub fn api_error(&self) -> Option<&E> {
-        match self {
-            RaftError::APIError(e) => Some(e),
-            RaftError::Fatal(_) => None,
-        }
+  /// Return a reference to Self::APIError.
+  pub fn api_error(&self) -> Option<&E> {
+    match self {
+      RaftError::APIError(e) => Some(e),
+      RaftError::Fatal(_) => None,
     }
+  }
 
-    /// Try to convert self to APIError.
-    pub fn into_api_error(self) -> Option<E> {
-        match self {
-            RaftError::APIError(e) => Some(e),
-            RaftError::Fatal(_) => None,
-        }
+  /// Try to convert self to APIError.
+  pub fn into_api_error(self) -> Option<E> {
+    match self {
+      RaftError::APIError(e) => Some(e),
+      RaftError::Fatal(_) => None,
     }
+  }
 
-    /// Return a reference to Self::Fatal.
-    pub fn fatal(&self) -> Option<&Fatal<C>> {
-        match self {
-            RaftError::APIError(_) => None,
-            RaftError::Fatal(f) => Some(f),
-        }
+  /// Return a reference to Self::Fatal.
+  pub fn fatal(&self) -> Option<&Fatal<C>> {
+    match self {
+      RaftError::APIError(_) => None,
+      RaftError::Fatal(f) => Some(f),
     }
+  }
 
-    /// Try to convert self to Fatal error.
-    pub fn into_fatal(self) -> Option<Fatal<C>> {
-        match self {
-            RaftError::APIError(_) => None,
-            RaftError::Fatal(f) => Some(f),
-        }
+  /// Try to convert self to Fatal error.
+  pub fn into_fatal(self) -> Option<Fatal<C>> {
+    match self {
+      RaftError::APIError(_) => None,
+      RaftError::Fatal(f) => Some(f),
     }
+  }
 
-    /// Return a reference to ForwardToLeader if Self::APIError contains it.
-    pub fn forward_to_leader(&self) -> Option<&ForwardToLeader<C>>
-    where
-        E: ForwardToLeaderRef<C>,
-    {
-        match self {
-            RaftError::APIError(api_err) => api_err.forward_to_leader(),
-            RaftError::Fatal(_) => None,
-        }
+  /// Return a reference to ForwardToLeader if Self::APIError contains it.
+  pub fn forward_to_leader(&self) -> Option<&ForwardToLeader<C>>
+  where
+    E: ForwardToLeaderRef<C>,
+  {
+    match self {
+      RaftError::APIError(api_err) => api_err.forward_to_leader(),
+      RaftError::Fatal(_) => None,
     }
+  }
 
-    /// Try to convert self to ForwardToLeader error if APIError is a ForwardToLeader error.
-    pub fn into_forward_to_leader(self) -> Option<ForwardToLeader<C>>
-    where
-        E: TryInto<ForwardToLeader<C>>,
-    {
-        match self {
-            RaftError::APIError(api_err) => api_err.try_into().ok(),
-            RaftError::Fatal(_) => None,
-        }
+  /// Try to convert self to ForwardToLeader error if APIError is a ForwardToLeader error.
+  pub fn into_forward_to_leader(self) -> Option<ForwardToLeader<C>>
+  where
+    E: TryInto<ForwardToLeader<C>>,
+  {
+    match self {
+      RaftError::APIError(api_err) => api_err.try_into().ok(),
+      RaftError::Fatal(_) => None,
     }
+  }
 }
 
 impl<C, E> ForwardToLeaderRef<C> for RaftError<C, E>
 where
-    C: RaftTypeConfig,
-    E: Debug + ForwardToLeaderRef<C>,
+  C: RaftTypeConfig,
+  E: Debug + ForwardToLeaderRef<C>,
 {
-    fn forward_to_leader(&self) -> Option<&ForwardToLeader<C>> {
-        self.forward_to_leader()
-    }
+  fn forward_to_leader(&self) -> Option<&ForwardToLeader<C>> {
+    self.forward_to_leader()
+  }
 }
 
 impl<C, E> From<StorageError<C>> for RaftError<C, E>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    fn from(se: StorageError<C>) -> Self {
-        RaftError::Fatal(Fatal::from(se))
-    }
+  fn from(se: StorageError<C>) -> Self {
+    RaftError::Fatal(Fatal::from(se))
+  }
 }
 
 /// Peel off `Fatal`, leaving the API error `E` as the residual.
 impl<C, E> Peel for RaftError<C, E>
 where
-    C: RaftTypeConfig,
-    E: Debug,
+  C: RaftTypeConfig,
+  E: Debug,
 {
-    type Peeled = Fatal<C>;
-    type Residual = E;
+  type Peeled = Fatal<C>;
+  type Residual = E;
 
-    fn peel(self) -> Result<E, Fatal<C>> {
-        match self {
-            RaftError::APIError(e) => Ok(e),
-            RaftError::Fatal(f) => Err(f),
-        }
+  fn peel(self) -> Result<E, Fatal<C>> {
+    match self {
+      RaftError::APIError(e) => Ok(e),
+      RaftError::Fatal(f) => Err(f),
     }
+  }
 }

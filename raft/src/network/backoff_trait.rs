@@ -1,9 +1,6 @@
 //! Defines the [`NetBackoff`] trait for network backoff behavior.
 
-use crate::OptionalSend;
-use crate::OptionalSync;
-use crate::RaftTypeConfig;
-use crate::network::Backoff;
+use crate::{OptionalSend, OptionalSync, RaftTypeConfig, network::Backoff};
 
 /// Provides backoff strategy for network operations.
 ///
@@ -16,19 +13,19 @@ use crate::network::Backoff;
 /// [`RaftNetwork`]: crate::network::RaftNetwork
 pub trait NetBackoff<C>: OptionalSend + OptionalSync + 'static
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    /// Build a backoff instance if the target node is temporarily(or permanently) unreachable.
-    ///
-    /// When a [`Unreachable`](`crate::error::Unreachable`) error is returned from the `Network`
-    /// methods, Openraft does not retry connecting to a node immediately. Instead, it sleeps
-    /// for a while and retries. The duration of the sleep is determined by the backoff
-    /// instance.
-    ///
-    /// The backoff is an infinite iterator that returns the ith sleep interval before the ith
-    /// retry. The returned instance will be dropped if a successful RPC is made.
-    ///
-    /// Return `None` to use the default backoff configured in
-    /// [`Config::backoff`](crate::Config::backoff).
-    fn backoff(&self) -> Option<Backoff>;
+  /// Build a backoff instance if the target node is temporarily(or permanently) unreachable.
+  ///
+  /// When a [`Unreachable`](`crate::error::Unreachable`) error is returned from the `Network`
+  /// methods, Openraft does not retry connecting to a node immediately. Instead, it sleeps
+  /// for a while and retries. The duration of the sleep is determined by the backoff
+  /// instance.
+  ///
+  /// The backoff is an infinite iterator that returns the ith sleep interval before the ith
+  /// retry. The returned instance will be dropped if a successful RPC is made.
+  ///
+  /// Return `None` to use the default backoff configured in
+  /// [`Config::backoff`](crate::Config::backoff).
+  fn backoff(&self) -> Option<Backoff>;
 }

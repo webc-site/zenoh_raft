@@ -18,16 +18,15 @@
 //! counter.0.fetch_add(1, Ordering::Relaxed);
 //! ```
 
-use std::any::TypeId;
-use std::fmt::Debug;
-use std::fmt::Formatter;
-use std::fmt::Result as FmtResult;
-use std::sync::Mutex;
+use std::{
+  any::TypeId,
+  fmt::{Debug, Formatter, Result as FmtResult},
+  sync::Mutex,
+};
 
 use rapidhash::RapidHashMap as HashMap;
 
-use crate::base::BoxAny;
-use crate::base::OptionalSend;
+use crate::base::{BoxAny, OptionalSend};
 
 /// A type-map for storing user-defined extension data.
 ///
@@ -37,126 +36,128 @@ use crate::base::OptionalSend;
 /// Values must implement [`Clone`] and [`Default`]. When retrieved via [`get()`](Self::get),
 /// a clone is returned. If no value exists, `T::default()` is inserted and returned.
 pub struct Extensions {
-    map: Mutex<HashMap<TypeId, BoxAny>>,
+  map: Mutex<HashMap<TypeId, BoxAny>>,
 }
 
 impl Extensions {
-    /// Get a clone of the value of type `T`.
-    ///
-    /// If no value exists, `T::default()` is inserted and a clone is returned.
-    pub fn get<T>(&self) -> T
-    where
-        T: OptionalSend + Clone + Default + 'static,
-    {
-        let mut map = self.map.lock().unwrap();
-        let type_id = TypeId::of::<T>();
+  /// Get a clone of the value of type `T`.
+  ///
+  /// If no value exists, `T::default()` is inserted and a clone is returned.
+  pub fn get<T>(&self) -> T
+  where
+    T: OptionalSend + Clone + Default + 'static,
+  {
+    let mut map = self.map.lock().unwrap();
+    let type_id = TypeId::of::<T>();
 
-        if let Some(val) = map.get(&type_id).and_then(|b| b.downcast_ref::<T>()) {
-            return val.clone();
-        }
-
-        let val = T::default();
-        map.insert(type_id, Box::new(val.clone()));
-        val
+    if let Some(val) = map.get(&type_id).and_then(|b| b.downcast_ref::<T>()) {
+      return val.clone();
     }
 
-    /// Check if a value of type `T` exists.
-    pub fn contains<T>(&self) -> bool
-    where
-        T: 'static,
-    {
-        let map = self.map.lock().unwrap();
-        map.contains_key(&TypeId::of::<T>())
-    }
+    let val = T::default();
+    map.insert(type_id, Box::new(val.clone()));
+    val
+  }
 
-    /// Remove and return a value of type `T`.
-    pub fn remove<T>(&self) -> Option<T>
-    where
-        T: 'static,
-    {
-        let mut map = self.map.lock().unwrap();
-        map.remove(&TypeId::of::<T>())
-            .and_then(|boxed| boxed.downcast().ok().map(|b| *b))
-    }
+  /// Check if a value of type `T` exists.
+  pub fn contains<T>(&self) -> bool
+  where
+    T: 'static,
+  {
+    let map = self.map.lock().unwrap();
+    map.contains_key(&TypeId::of::<T>())
+  }
+
+  /// Remove and return a value of type `T`.
+  pub fn remove<T>(&self) -> Option<T>
+  where
+    T: 'static,
+  {
+    let mut map = self.map.lock().unwrap();
+    map
+      .remove(&TypeId::of::<T>())
+      .and_then(|boxed| boxed.downcast().ok().map(|b| *b))
+  }
 }
 
 impl Default for Extensions {
-    fn default() -> Self {
-        Self {
-            map: Mutex::new(HashMap::default()),
-        }
+  fn default() -> Self {
+    Self {
+      map: Mutex::new(HashMap::default()),
     }
+  }
 }
 
 impl Debug for Extensions {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        let count = self.map.lock().map(|m| m.len()).unwrap_or(0);
-        f.debug_struct("Extensions").field("count", &count).finish()
-    }
+  fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    let count = self.map.lock().map(|m| m.len()).unwrap_or(0);
+    f.debug_struct("Extensions").field("count", &count).finish()
+  }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicU64;
-    use std::sync::atomic::Ordering;
+  use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+  };
 
-    use super::*;
+  use super::*;
 
-    #[test]
-    fn test_get_inserts_default() {
-        let ext = Extensions::default();
+  #[test]
+  fn test_get_inserts_default() {
+    let ext = Extensions::default();
 
-        #[derive(Clone, Default, PartialEq, Debug)]
-        struct MyData(u32);
+    #[derive(Clone, Default, PartialEq, Debug)]
+    struct MyData(u32);
 
-        // First call creates default value
-        let val = ext.get::<MyData>();
-        assert_eq!(val, MyData(0));
+    // First call creates default value
+    let val = ext.get::<MyData>();
+    assert_eq!(val, MyData(0));
 
-        // Value is now stored
-        assert!(ext.contains::<MyData>());
+    // Value is now stored
+    assert!(ext.contains::<MyData>());
 
-        // Second call returns same value
-        let val2 = ext.get::<MyData>();
-        assert_eq!(val2, MyData(0));
-    }
+    // Second call returns same value
+    let val2 = ext.get::<MyData>();
+    assert_eq!(val2, MyData(0));
+  }
 
-    #[test]
-    fn test_shared_state_with_arc() {
-        let ext = Extensions::default();
+  #[test]
+  fn test_shared_state_with_arc() {
+    let ext = Extensions::default();
 
-        #[derive(Clone, Default)]
-        struct Counter(Arc<AtomicU64>);
+    #[derive(Clone, Default)]
+    struct Counter(Arc<AtomicU64>);
 
-        // Get clone and mutate
-        let counter1 = ext.get::<Counter>();
-        counter1.0.fetch_add(1, Ordering::Relaxed);
-        counter1.0.fetch_add(1, Ordering::Relaxed);
+    // Get clone and mutate
+    let counter1 = ext.get::<Counter>();
+    counter1.0.fetch_add(1, Ordering::Relaxed);
+    counter1.0.fetch_add(1, Ordering::Relaxed);
 
-        // Get another clone - shares the same Arc
-        let counter2 = ext.get::<Counter>();
-        assert_eq!(counter2.0.load(Ordering::Relaxed), 2);
+    // Get another clone - shares the same Arc
+    let counter2 = ext.get::<Counter>();
+    assert_eq!(counter2.0.load(Ordering::Relaxed), 2);
 
-        // More increments
-        counter2.0.fetch_add(1, Ordering::Relaxed);
-        assert_eq!(counter1.0.load(Ordering::Relaxed), 3);
-    }
+    // More increments
+    counter2.0.fetch_add(1, Ordering::Relaxed);
+    assert_eq!(counter1.0.load(Ordering::Relaxed), 3);
+  }
 
-    #[test]
-    fn test_remove() {
-        let ext = Extensions::default();
+  #[test]
+  fn test_remove() {
+    let ext = Extensions::default();
 
-        #[derive(Clone, Default, PartialEq, Debug)]
-        struct MyData(u32);
+    #[derive(Clone, Default, PartialEq, Debug)]
+    struct MyData(u32);
 
-        // Insert via get
-        let _ = ext.get::<MyData>();
-        assert!(ext.contains::<MyData>());
+    // Insert via get
+    let _ = ext.get::<MyData>();
+    assert!(ext.contains::<MyData>());
 
-        // Remove
-        assert_eq!(ext.remove::<MyData>(), Some(MyData(0)));
-        assert!(!ext.contains::<MyData>());
-        assert!(ext.remove::<MyData>().is_none());
-    }
+    // Remove
+    assert_eq!(ext.remove::<MyData>(), Some(MyData(0)));
+    assert!(!ext.contains::<MyData>());
+    assert!(ext.remove::<MyData>().is_none());
+  }
 }

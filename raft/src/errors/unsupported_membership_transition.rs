@@ -56,11 +56,11 @@ use crate::node::NodeId;
 #[error("unsupported membership transition: from voters {previous:?} to voters {proposed:?}")]
 pub struct UnsupportedMembershipTransition<NID>
 where
-    NID: NodeId,
+  NID: NodeId,
 {
-    /// The voter sets of the last effective membership.
-    pub previous: Vec<BTreeSet<NID>>,
+  /// The voter sets of the last effective membership.
+  pub previous: Vec<BTreeSet<NID>>,
 
-    /// The voter sets of the membership the caller proposed.
-    pub proposed: Vec<BTreeSet<NID>>,
+  /// The voter sets of the membership the caller proposed.
+  pub proposed: Vec<BTreeSet<NID>>,
 }

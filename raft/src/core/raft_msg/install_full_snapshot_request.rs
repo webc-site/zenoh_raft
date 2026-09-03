@@ -1,11 +1,11 @@
 use std::fmt;
 
-use crate::RaftTypeConfig;
-use crate::raft::SnapshotResponse;
-use crate::storage::RaftStateMachine;
-use crate::type_config::alias::OneshotSenderOf;
-use crate::type_config::alias::SmSnapshotOf;
-use crate::type_config::alias::VoteOf;
+use crate::{
+  RaftTypeConfig,
+  raft::SnapshotResponse,
+  storage::RaftStateMachine,
+  type_config::alias::{OneshotSenderOf, SmSnapshotOf, VoteOf},
+};
 
 /// A request to install a full snapshot, sent to [`RaftCore`] via a dedicated channel.
 ///
@@ -16,24 +16,24 @@ use crate::type_config::alias::VoteOf;
 /// [`RaftMsg`]: crate::core::raft_msg::RaftMsg
 pub(crate) struct InstallFullSnapshotRequest<C, SM>
 where
-    C: RaftTypeConfig,
-    SM: RaftStateMachine<C>,
+  C: RaftTypeConfig,
+  SM: RaftStateMachine<C>,
 {
-    pub(crate) vote: VoteOf<C>,
-    pub(crate) snapshot: SmSnapshotOf<C, SM>,
-    pub(crate) tx: OneshotSenderOf<C, SnapshotResponse<C>>,
+  pub(crate) vote: VoteOf<C>,
+  pub(crate) snapshot: SmSnapshotOf<C, SM>,
+  pub(crate) tx: OneshotSenderOf<C, SnapshotResponse<C>>,
 }
 
 impl<C, SM> fmt::Display for InstallFullSnapshotRequest<C, SM>
 where
-    C: RaftTypeConfig,
-    SM: RaftStateMachine<C>,
+  C: RaftTypeConfig,
+  SM: RaftStateMachine<C>,
 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "InstallFullSnapshot: vote: {}, snapshot: {}",
-            self.vote, self.snapshot
-        )
-    }
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(
+      f,
+      "InstallFullSnapshot: vote: {}, snapshot: {}",
+      self.vote, self.snapshot
+    )
+  }
 }

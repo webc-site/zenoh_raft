@@ -1,12 +1,11 @@
-use std::fmt::Display;
-use std::fmt::Formatter;
-use std::fmt::Result as FmtResult;
+use std::fmt::{Display, Formatter, Result as FmtResult};
 
 use display_more::DisplayOptionExt;
 
-use crate::RaftTypeConfig;
-use crate::type_config::alias::CommittedVoteOf;
-use crate::type_config::alias::LogIdOf;
+use crate::{
+  RaftTypeConfig,
+  type_config::alias::{CommittedVoteOf, LogIdOf},
+};
 
 /// Uniquely identifies a replication session.
 ///
@@ -21,37 +20,37 @@ use crate::type_config::alias::LogIdOf;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReplicationSessionId<C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    /// The Leader or Candidate this replication belongs to.
-    pub(crate) leader_vote: CommittedVoteOf<C>,
+  /// The Leader or Candidate this replication belongs to.
+  pub(crate) leader_vote: CommittedVoteOf<C>,
 
-    /// The log id of the membership log this replication works for.
-    pub(crate) membership_log_id: Option<LogIdOf<C>>,
+  /// The log id of the membership log this replication works for.
+  pub(crate) membership_log_id: Option<LogIdOf<C>>,
 }
 
 impl<C> Display for ReplicationSessionId<C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(
-            f,
-            "(leader_vote:{}, membership_log_id:{})",
-            self.leader_vote,
-            self.membership_log_id.display()
-        )
-    }
+  fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    write!(
+      f,
+      "(leader_vote:{}, membership_log_id:{})",
+      self.leader_vote,
+      self.membership_log_id.display()
+    )
+  }
 }
 
 impl<C> ReplicationSessionId<C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    pub(crate) fn new(vote: CommittedVoteOf<C>, membership_log_id: Option<LogIdOf<C>>) -> Self {
-        Self {
-            leader_vote: vote,
-            membership_log_id,
-        }
+  pub(crate) fn new(vote: CommittedVoteOf<C>, membership_log_id: Option<LogIdOf<C>>) -> Self {
+    Self {
+      leader_vote: vote,
+      membership_log_id,
     }
+  }
 }

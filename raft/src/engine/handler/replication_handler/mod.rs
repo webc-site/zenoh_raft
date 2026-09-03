@@ -1,40 +1,24 @@
 use std::sync::Arc;
 
-use display_more::DisplayOptionExt;
-use display_more::DisplayResultExt;
+use display_more::{DisplayOptionExt, DisplayResultExt};
 use progress::entry::update::Updater;
 
-use crate::LogIdOptionExt;
-use crate::Membership;
-use crate::RaftState;
-use crate::RaftTypeConfig;
-use crate::ServerState;
-use crate::display_ext::DisplayInstantExt;
-use crate::engine::Command;
-use crate::engine::EngineConfig;
-use crate::engine::EngineOutput;
-use crate::engine::TargetProgress;
-use crate::engine::handler::log_handler::LogHandler;
-use crate::errors::NodeNotFound;
-use crate::errors::Operation;
-use crate::progress;
-use crate::progress::Inflight;
-use crate::progress::entry::ProgressEntry;
-use crate::progress::id_val::IdVal;
-use crate::progress::inflight_id::InflightId;
-use crate::progress::stream_id::StreamId;
-use crate::proposer::Leader;
-use crate::proposer::LeaderQuorumSet;
-use crate::raft_state::LogStateReader;
-use crate::raft_state::io_state::log_io_id::LogIOId;
-use crate::replication::replicate::Replicate;
-use crate::replication::response::ReplicationResult;
-use crate::storage::RaftStateMachine;
-use crate::type_config::alias::CommittedVoteOf;
-use crate::type_config::alias::InstantOf;
-use crate::type_config::alias::LogIdOf;
-use crate::type_config::alias::StoredMembershipOf;
-use crate::vote::raft_vote::RaftVoteExt;
+use crate::{
+  LogIdOptionExt, Membership, RaftState, RaftTypeConfig, ServerState,
+  display_ext::DisplayInstantExt,
+  engine::{Command, EngineConfig, EngineOutput, TargetProgress, handler::log_handler::LogHandler},
+  errors::{NodeNotFound, Operation},
+  progress,
+  progress::{
+    Inflight, entry::ProgressEntry, id_val::IdVal, inflight_id::InflightId, stream_id::StreamId,
+  },
+  proposer::{Leader, LeaderQuorumSet},
+  raft_state::{LogStateReader, io_state::log_io_id::LogIOId},
+  replication::{replicate::Replicate, response::ReplicationResult},
+  storage::RaftStateMachine,
+  type_config::alias::{CommittedVoteOf, InstantOf, LogIdOf, StoredMembershipOf},
+  vote::raft_vote::RaftVoteExt,
+};
 
 #[cfg(test)]
 mod append_membership_test;
@@ -55,520 +39,524 @@ mod update_matching_test;
 /// - etc.
 pub(crate) struct ReplicationHandler<'x, C, SM = ()>
 where
-    C: RaftTypeConfig,
-    SM: RaftStateMachine<C>,
+  C: RaftTypeConfig,
+  SM: RaftStateMachine<C>,
 {
-    pub(crate) config: &'x mut EngineConfig<C>,
-    pub(crate) leader: &'x mut Leader<C, LeaderQuorumSet<C>>,
-    pub(crate) state: &'x mut RaftState<C>,
-    pub(crate) output: &'x mut EngineOutput<C, SM>,
+  pub(crate) config: &'x mut EngineConfig<C>,
+  pub(crate) leader: &'x mut Leader<C, LeaderQuorumSet<C>>,
+  pub(crate) state: &'x mut RaftState<C>,
+  pub(crate) output: &'x mut EngineOutput<C, SM>,
 }
 
 impl<'x, C, SM> ReplicationHandler<'x, C, SM>
 where
-    C: RaftTypeConfig,
-    SM: RaftStateMachine<C>,
+  C: RaftTypeConfig,
+  SM: RaftStateMachine<C>,
 {
-    pub(crate) fn new(
-        config: &'x mut EngineConfig<C>,
-        leader: &'x mut Leader<C, LeaderQuorumSet<C>>,
-        state: &'x mut RaftState<C>,
-        output: &'x mut EngineOutput<C, SM>,
-    ) -> Self {
-        Self {
-            config,
-            leader,
-            state,
-            output,
-        }
+  pub(crate) fn new(
+    config: &'x mut EngineConfig<C>,
+    leader: &'x mut Leader<C, LeaderQuorumSet<C>>,
+    state: &'x mut RaftState<C>,
+    output: &'x mut EngineOutput<C, SM>,
+  ) -> Self {
+    Self {
+      config,
+      leader,
+      state,
+      output,
+    }
+  }
+
+  /// Append a new membership and update related state such as replication streams.
+  ///
+  /// It is called by the leader when a new membership log is appended to the log store.
+  pub(crate) fn append_membership(
+    &mut self,
+    log_id: &LogIdOf<C>,
+    m: &Membership<C::NodeId, C::Node>,
+  ) {
+    log::debug!("update effective membership: log_id:{} {}", log_id, m);
+
+    debug_assert!(
+      self.state.server_state == ServerState::Leader,
+      "Only leader is allowed to call update_effective_membership()"
+    );
+    debug_assert!(
+      self.state.is_leader(&self.config.id),
+      "Only leader is allowed to call update_effective_membership()"
+    );
+
+    self
+      .state
+      .membership_state
+      .append(StoredMembershipOf::<C>::new_arc(
+        Some(log_id.clone()),
+        m.clone(),
+      ));
+
+    // TODO(9): currently only a leader has replication setup.
+    //       It's better to setup replication for both leader and candidate.
+    //       e.g.: if self.internal_server_state.is_leading() {
+
+    // Leader does not quit at once:
+    // A leader should always keep replicating logs.
+    // A leader that is removed will shut down replications when this membership log is
+    // committed.
+
+    self.rebuild_progresses();
+    self.rebuild_replication_streams(false);
+    self.initiate_replication();
+  }
+
+  /// Rebuild leader's replication progress to reflect replication changes.
+  ///
+  /// E.g., when adding/removing a follower/learner.
+  pub(crate) fn rebuild_progresses(&mut self) {
+    let em = self.state.membership_state.effective();
+
+    let learner_ids = em.learner_ids().collect::<Vec<_>>();
+
+    {
+      let end = self.state.last_log_id().next_index();
+
+      let old_progress = self.leader.progress.clone();
+
+      let id_gen = self.state.progress_id_gen.clone();
+      let default_entry = |id| {
+        let progress_id = StreamId::new(id_gen.next_id());
+        ProgressEntry::empty(id, progress_id, end)
+      };
+
+      self.leader.progress = old_progress.upgrade_quorum_set(
+        Arc::new((*em.membership()).clone()),
+        learner_ids.clone(),
+        default_entry,
+      );
     }
 
-    /// Append a new membership and update related state such as replication streams.
-    ///
-    /// It is called by the leader when a new membership log is appended to the log store.
-    pub(crate) fn append_membership(
-        &mut self,
-        log_id: &LogIdOf<C>,
-        m: &Membership<C::NodeId, C::Node>,
-    ) {
-        log::debug!("update effective membership: log_id:{} {}", log_id, m);
+    {
+      let old_progress = self.leader.clock_progress.clone();
 
-        debug_assert!(
-            self.state.server_state == ServerState::Leader,
-            "Only leader is allowed to call update_effective_membership()"
-        );
-        debug_assert!(
-            self.state.is_leader(&self.config.id),
-            "Only leader is allowed to call update_effective_membership()"
-        );
+      self.leader.clock_progress = old_progress.upgrade_quorum_set(
+        Arc::new((*em.membership()).clone()),
+        learner_ids,
+        IdVal::new_default,
+      );
+    }
+  }
 
-        self.state
-            .membership_state
-            .append(StoredMembershipOf::<C>::new_arc(
-                Some(log_id.clone()),
-                m.clone(),
-            ));
+  /// Update progress when replicated data(logs or snapshot) matches on follower/learner and is
+  /// accepted.
+  pub(crate) fn try_update_leader_clock(
+    &mut self,
+    stream_id: StreamId,
+    target: C::NodeId,
+    sending_time: InstantOf<C>,
+  ) {
+    // clock_progress and progress has the same structure but clock_progress does not store stream_id.
+    // Thus we need to check stream_id in progress to ensure the stream is correct.
 
-        // TODO(9): currently only a leader has replication setup.
-        //       It's better to setup replication for both leader and candidate.
-        //       e.g.: if self.internal_server_state.is_leading() {
+    log::debug!(
+      "{}: target: {}, t: {}",
+      func_name!(),
+      target,
+      sending_time.display()
+    );
 
-        // Leader does not quit at once:
-        // A leader should always keep replicating logs.
-        // A leader that is removed will shut down replications when this membership log is
-        // committed.
-
-        self.rebuild_progresses();
-        self.rebuild_replication_streams(false);
-        self.initiate_replication();
+    if !self.leader.is_replication_stream_valid(&target, stream_id) {
+      return;
     }
 
-    /// Rebuild leader's replication progress to reflect replication changes.
-    ///
-    /// E.g., when adding/removing a follower/learner.
-    pub(crate) fn rebuild_progresses(&mut self) {
-        let em = self.state.membership_state.effective();
+    let granted = self.leader.update_clock(&target, sending_time);
 
-        let learner_ids = em.learner_ids().collect::<Vec<_>>();
+    log::debug!(
+      "granted leader vote clock after updating: granted: {}; clock_progress: {}",
+      granted.as_ref().map(|x| x.display()).display(),
+      self.leader.clock_progress.display_with(|f, item| {
+        write!(
+          f,
+          "{}: {}",
+          item.id,
+          item.val.as_ref().map(|x| x.display()).display()
+        )
+      })
+    );
 
-        {
-            let end = self.state.last_log_id().next_index();
+    // When membership changes, the granted value may revert to a previous value.
+    // E.g.: when membership changes from 12345 to {12345,123}:
+    // ```
+    // Voters: 1 2 3 4 5
+    // Value:  1 1 2 2 2 // 2 is granted by a quorum
+    //
+    // Voters: 1 2 3 4 5
+    //         1 2 3
+    // Value:  1 1 2 2 2 // 1 is granted by a quorum
+    // ```
+  }
 
-            let old_progress = self.leader.progress.clone();
+  /// Update progress when replicated data(logs or snapshot) matches on follower/learner and is
+  /// accepted.
+  pub(crate) fn update_matching(
+    &mut self,
+    node_id: C::NodeId,
+    log_id: Option<LogIdOf<C>>,
+    inflight_id: Option<InflightId>,
+  ) {
+    log::debug!(
+      "{}: node_id: {}, log_id: {}",
+      func_name!(),
+      node_id,
+      log_id.display()
+    );
 
-            let id_gen = self.state.progress_id_gen.clone();
-            let default_entry = |id| {
-                let progress_id = StreamId::new(id_gen.next_id());
-                ProgressEntry::empty(id, progress_id, end)
-            };
+    debug_assert!(
+      log_id.is_some(),
+      "a valid update can never set matching to None"
+    );
 
-            self.leader.progress = old_progress.upgrade_quorum_set(
-                Arc::new((*em.membership()).clone()),
-                learner_ids.clone(),
-                default_entry,
-            );
-        }
+    // The value granted by a quorum may not yet be a committed.
+    // A committed is **granted** and also is in the current term.
+    let Ok(quorum_accepted) = self.leader.progress.update_entry_with(&node_id, |entry| {
+      entry
+        .new_updater(&*self.config)
+        .update_matching(log_id, inflight_id)
+    }) else {
+      // the node does not exist anymore
+      return;
+    };
 
-        {
-            let old_progress = self.leader.clock_progress.clone();
+    let quorum_accepted = quorum_accepted.clone();
 
-            self.leader.clock_progress = old_progress.upgrade_quorum_set(
-                Arc::new((*em.membership()).clone()),
-                learner_ids,
-                IdVal::new_default,
-            );
-        }
+    log::debug!(
+      "after updating progress: quorum_accepted: {}",
+      quorum_accepted.display()
+    );
+
+    self.try_commit_quorum_accepted(quorum_accepted);
+  }
+
+  /// Commit the log id that is granted(accepted) by a quorum of voters.
+  ///
+  /// In raft a log that is granted and in the leader term is committed.
+  pub(crate) fn try_commit_quorum_accepted(&mut self, granted: Option<LogIdOf<C>>) {
+    // Only when the log id is proposed by the current leader, it is committed.
+    if let Some(ref c) = granted
+      && !self
+        .state
+        .vote_ref()
+        .is_same_leader(c.committed_leader_id())
+    {
+      return;
     }
 
-    /// Update progress when replicated data(logs or snapshot) matches on follower/learner and is
-    /// accepted.
-    pub(crate) fn try_update_leader_clock(
-        &mut self,
-        stream_id: StreamId,
-        target: C::NodeId,
-        sending_time: InstantOf<C>,
-    ) {
-        // clock_progress and progress has the same structure but clock_progress does not store stream_id.
-        // Thus we need to check stream_id in progress to ensure the stream is correct.
+    let prev_cluster_committed = self.state.cluster_committed().cloned();
 
-        log::debug!(
-            "{}: target: {}, t: {}",
-            func_name!(),
-            target,
-            sending_time.display()
-        );
+    let committed = LogIOId::new(self.state.vote_ref().to_committed(), granted.clone());
+    self
+      .state
+      .io_state_mut()
+      .cluster_committed
+      .try_update(committed)
+      .ok();
 
-        if !self.leader.is_replication_stream_valid(&target, stream_id) {
-            return;
-        }
+    // Advance the local apply ceiling regardless; it is a no-op when nothing changed.
+    self.state.update_local_committed(&granted);
 
-        let granted = self.leader.update_clock(&target, sending_time);
+    // Notify replication only when the cluster-committed log id advanced. The vote component of
+    // `cluster_committed` can bump on its own at leadership start with no new committed log id,
+    // which must not trigger a broadcast.
+    if self.state.cluster_committed() > prev_cluster_committed.as_ref() {
+      self.output.push_command(Command::ReplicateCommitted {
+        committed: self.state.cluster_committed().cloned(),
+      });
+    }
+  }
 
-        log::debug!(
-            "granted leader vote clock after updating: granted: {}; clock_progress: {}",
-            granted.as_ref().map(|x| x.display()).display(),
-            self.leader.clock_progress.display_with(|f, item| {
-                write!(
-                    f,
-                    "{}: {}",
-                    item.id,
-                    item.val.as_ref().map(|x| x.display()).display()
-                )
-            })
-        );
+  /// Update progress when replicated data(logs or snapshot) does not match the follower/learner
+  /// state and is rejected.
+  ///
+  /// If `inflight_id` is `Some`, the inflight state is reset because the response corresponds
+  /// to a replication request with log payload; a stale inflight ID leaves the progress entry
+  /// unchanged. If `None`, the response is from an RPC without payload (e.g., heartbeat), and
+  /// inflight state is not modified.
+  ///
+  /// This method intentionally bypasses `VecProgress::update_entry_with()`: when log
+  /// reversion is explicitly allowed, [`Updater::update_conflicting()`] may reset
+  /// `matching` to `None`. `VecProgress::reset_entry_with()` moves the entry down to
+  /// keep the progress ordering, but deliberately does not lower the recorded
+  /// quorum-accepted value: a value accepted by a quorum must never be withdrawn.
+  pub(crate) fn update_conflicting(
+    &mut self,
+    target: C::NodeId,
+    conflict: LogIdOf<C>,
+    inflight_id: Option<InflightId>,
+  ) {
+    self.leader.progress.reset_entry_with(&target, |entry| {
+      let mut updater = Updater::new(&*self.config, entry);
+      updater.update_conflicting(conflict.index(), inflight_id);
+    });
+  }
 
-        // When membership changes, the granted value may revert to a previous value.
-        // E.g.: when membership changes from 12345 to {12345,123}:
-        // ```
-        // Voters: 1 2 3 4 5
-        // Value:  1 1 2 2 2 // 2 is granted by a quorum
-        //
-        // Voters: 1 2 3 4 5
-        //         1 2 3
-        // Value:  1 1 2 2 2 // 1 is granted by a quorum
-        // ```
+  /// Enable one-time replication reset for a specific node upon log reversion detection.
+  ///
+  /// This method sets a flag to allow the replication process to be reset once for the specified
+  /// target node when a log reversion is detected. This is typically used to handle scenarios
+  /// where a follower node's log has unexpectedly reverted to a previous state.
+  ///
+  /// # Behavior
+  ///
+  /// - Sets the `reset_on_reversion` flag to `true` for the specified node in the leader's
+  ///   progress tracker.
+  /// - This flag will be consumed upon the next log reversion detection, allowing for a one-time
+  ///   reset.
+  /// - If the node is not found in the progress tracker, this method ignore it.
+  pub(crate) fn allow_next_revert(
+    &mut self,
+    target: C::NodeId,
+    allow: bool,
+  ) -> Result<(), NodeNotFound<C::NodeId>> {
+    let res = self
+      .leader
+      .progress
+      .update_data_with(&target, |data| data.allow_log_reversion = allow);
+
+    if res.is_none() {
+      log::warn!(
+        "target node {} not found in progress tracker, when {}",
+        target,
+        func_name!()
+      );
+      return Err(NodeNotFound::new(target, Operation::AllowNextRevert));
     }
 
-    /// Update progress when replicated data(logs or snapshot) matches on follower/learner and is
-    /// accepted.
-    pub(crate) fn update_matching(
-        &mut self,
-        node_id: C::NodeId,
-        log_id: Option<LogIdOf<C>>,
-        inflight_id: Option<InflightId>,
-    ) {
-        log::debug!(
-            "{}: node_id: {}, log_id: {}",
-            func_name!(),
-            node_id,
-            log_id.display()
-        );
+    Ok(())
+  }
 
-        debug_assert!(
-            log_id.is_some(),
-            "a valid update can never set matching to None"
-        );
+  /// Update replication progress when a response is received.
+  pub(crate) fn update_progress(
+    &mut self,
+    target: C::NodeId,
+    stream_id: StreamId,
+    repl_res: Result<ReplicationResult<C>, String>,
+    inflight_id: Option<InflightId>,
+  ) {
+    log::debug!(
+      "{}: target: {}, stream_id: {}, result: {}, inflight_id: {}, current progresses: {}",
+      func_name!(),
+      target,
+      stream_id,
+      repl_res.display(),
+      inflight_id.display(),
+      self.leader.progress
+    );
 
-        // The value granted by a quorum may not yet be a committed.
-        // A committed is **granted** and also is in the current term.
-        let Ok(quorum_accepted) = self.leader.progress.update_entry_with(&node_id, |entry| {
-            entry
-                .new_updater(&*self.config)
-                .update_matching(log_id, inflight_id)
-        }) else {
-            // the node does not exist anymore
-            return;
-        };
-
-        let quorum_accepted = quorum_accepted.clone();
-
-        log::debug!(
-            "after updating progress: quorum_accepted: {}",
-            quorum_accepted.display()
-        );
-
-        self.try_commit_quorum_accepted(quorum_accepted);
+    if !self.leader.is_replication_stream_valid(&target, stream_id) {
+      return;
     }
 
-    /// Commit the log id that is granted(accepted) by a quorum of voters.
-    ///
-    /// In raft a log that is granted and in the leader term is committed.
-    pub(crate) fn try_commit_quorum_accepted(&mut self, granted: Option<LogIdOf<C>>) {
-        // Only when the log id is proposed by the current leader, it is committed.
-        if let Some(ref c) = granted
-            && !self
-                .state
-                .vote_ref()
-                .is_same_leader(c.committed_leader_id())
-        {
-            return;
+    match repl_res {
+      Ok(p) => match p.0 {
+        Ok(matching) => {
+          self.update_matching(target, matching, inflight_id);
+        }
+        Err(conflict) => {
+          self.update_conflicting(target, conflict, inflight_id);
+        }
+      },
+      Err(err_str) => {
+        log::warn!("update progress error: {}", err_str);
+
+        // Reset inflight state and it will retry.
+        self
+          .leader
+          .progress
+          .update_data_with(&target, |data| data.inflight = Inflight::None);
+      }
+    };
+
+    // The purge job may be postponed because a replication task is using them.
+    // Thus, we just try again to purge when progress is updated.
+    self.try_purge_log();
+  }
+
+  /// Update replication streams to reflect replication progress change.
+  pub(crate) fn rebuild_replication_streams(&mut self, close_old: bool) {
+    let mut targets = vec![];
+
+    let membership = self.state.membership_state.effective();
+
+    for item in self.leader.progress.iter_mut_without_reorder() {
+      if item.id != self.config.id {
+        if close_old {
+          item.data.inflight = Inflight::None;
         }
 
-        let prev_cluster_committed = self.state.cluster_committed().cloned();
+        let target_node = membership.get_node(&item.id).unwrap().clone();
 
-        let committed = LogIOId::new(self.state.vote_ref().to_committed(), granted.clone());
-        self.state
-            .io_state_mut()
-            .cluster_committed
-            .try_update(committed)
-            .ok();
-
-        // Advance the local apply ceiling regardless; it is a no-op when nothing changed.
-        self.state.update_local_committed(&granted);
-
-        // Notify replication only when the cluster-committed log id advanced. The vote component of
-        // `cluster_committed` can bump on its own at leadership start with no new committed log id,
-        // which must not trigger a broadcast.
-        if self.state.cluster_committed() > prev_cluster_committed.as_ref() {
-            self.output.push_command(Command::ReplicateCommitted {
-                committed: self.state.cluster_committed().cloned(),
-            });
-        }
-    }
-
-    /// Update progress when replicated data(logs or snapshot) does not match the follower/learner
-    /// state and is rejected.
-    ///
-    /// If `inflight_id` is `Some`, the inflight state is reset because the response corresponds
-    /// to a replication request with log payload; a stale inflight ID leaves the progress entry
-    /// unchanged. If `None`, the response is from an RPC without payload (e.g., heartbeat), and
-    /// inflight state is not modified.
-    ///
-    /// This method intentionally bypasses `VecProgress::update_entry_with()`: when log
-    /// reversion is explicitly allowed, [`Updater::update_conflicting()`] may reset
-    /// `matching` to `None`. `VecProgress::reset_entry_with()` moves the entry down to
-    /// keep the progress ordering, but deliberately does not lower the recorded
-    /// quorum-accepted value: a value accepted by a quorum must never be withdrawn.
-    pub(crate) fn update_conflicting(
-        &mut self,
-        target: C::NodeId,
-        conflict: LogIdOf<C>,
-        inflight_id: Option<InflightId>,
-    ) {
-        self.leader.progress.reset_entry_with(&target, |entry| {
-            let mut updater = Updater::new(&*self.config, entry);
-            updater.update_conflicting(conflict.index(), inflight_id);
+        targets.push(TargetProgress {
+          target: item.id.clone(),
+          target_node,
+          progress: item.clone(),
         });
+      }
     }
+    self
+      .output
+      .push_command(Command::RebuildReplicationStreams {
+        leader_vote: self.leader.committed_vote.clone(),
+        targets,
+        close_old_streams: close_old,
+      });
+  }
 
-    /// Enable one-time replication reset for a specific node upon log reversion detection.
-    ///
-    /// This method sets a flag to allow the replication process to be reset once for the specified
-    /// target node when a log reversion is detected. This is typically used to handle scenarios
-    /// where a follower node's log has unexpectedly reverted to a previous state.
-    ///
-    /// # Behavior
-    ///
-    /// - Sets the `reset_on_reversion` flag to `true` for the specified node in the leader's
-    ///   progress tracker.
-    /// - This flag will be consumed upon the next log reversion detection, allowing for a one-time
-    ///   reset.
-    /// - If the node is not found in the progress tracker, this method ignore it.
-    pub(crate) fn allow_next_revert(
-        &mut self,
-        target: C::NodeId,
-        allow: bool,
-    ) -> Result<(), NodeNotFound<C::NodeId>> {
-        let res = self
-            .leader
-            .progress
-            .update_data_with(&target, |data| data.allow_log_reversion = allow);
+  /// Initiate replication for every target that is not sending data in flight.
+  ///
+  /// `send_none` specifies whether to force to send a message even when there is no data to send.
+  pub(crate) fn initiate_replication(&mut self) {
+    log::debug!("{}: progress: {:?}", func_name!(), self.leader.progress);
 
-        if res.is_none() {
-            log::warn!(
-                "target node {} not found in progress tracker, when {}",
-                target,
-                func_name!()
-            );
-            return Err(NodeNotFound::new(target, Operation::AllowNextRevert));
+    for item in self.leader.progress.iter_mut_without_reorder() {
+      // TODO: update matching should be done here for leader
+      //       or updating matching should be queued in commands?
+      if item.id == self.config.id {
+        continue;
+      }
+
+      let target = item.id.clone();
+      let t = item.next_send(self.state, self.config.max_payload_entries);
+      log::debug!("next send: target: {}, send: {:?}", target, t);
+
+      match t {
+        Ok(inflight) => {
+          let leader_vote = self.leader.committed_vote.clone();
+          Self::send_to_target(self.output, leader_vote, &target, inflight);
         }
-
-        Ok(())
-    }
-
-    /// Update replication progress when a response is received.
-    pub(crate) fn update_progress(
-        &mut self,
-        target: C::NodeId,
-        stream_id: StreamId,
-        repl_res: Result<ReplicationResult<C>, String>,
-        inflight_id: Option<InflightId>,
-    ) {
-        log::debug!(
-            "{}: target: {}, stream_id: {}, result: {}, inflight_id: {}, current progresses: {}",
-            func_name!(),
+        Err(e) => {
+          log::debug!(
+            "no data to replicate for node-{}: current inflight: {:?}",
             target,
-            stream_id,
-            repl_res.display(),
-            inflight_id.display(),
-            self.leader.progress
-        );
-
-        if !self.leader.is_replication_stream_valid(&target, stream_id) {
-            return;
+            e,
+          );
         }
+      }
+    }
+  }
 
-        match repl_res {
-            Ok(p) => match p.0 {
-                Ok(matching) => {
-                    self.update_matching(target, matching, inflight_id);
-                }
-                Err(conflict) => {
-                    self.update_conflicting(target, conflict, inflight_id);
-                }
-            },
-            Err(err_str) => {
-                log::warn!("update progress error: {}", err_str);
+  pub(crate) fn send_to_target(
+    output: &mut EngineOutput<C, SM>,
+    leader_vote: CommittedVoteOf<C>,
+    target: &C::NodeId,
+    inflight: &Inflight<C>,
+  ) {
+    match inflight {
+      Inflight::None => unreachable!("no data to send"),
+      Inflight::Logs {
+        log_id_range,
+        inflight_id,
+      } => {
+        let req = Replicate::new_logs(log_id_range.clone(), *inflight_id);
+        output.push_command(Command::Replicate {
+          target: target.clone(),
+          req,
+        });
+      }
+      Inflight::Snapshot { inflight_id } => {
+        output.push_command(Command::ReplicateSnapshot {
+          leader_vote,
+          target: target.clone(),
+          inflight_id: *inflight_id,
+        });
+      }
+      Inflight::LogsSince { prev, inflight_id } => {
+        let req = Replicate::new_logs_since(prev.clone(), *inflight_id);
+        output.push_command(Command::Replicate {
+          target: target.clone(),
+          req,
+        });
+      }
+    };
+  }
 
-                // Reset inflight state and it will retry.
-                self.leader
-                    .progress
-                    .update_data_with(&target, |data| data.inflight = Inflight::None);
-            }
-        };
+  /// Try to run a pending purge job if no tasks are using the logs to be purged.
+  ///
+  /// Purging logs involves concurrent log accesses by replication tasks and purging tasks.
+  /// Therefore, it is a method of ReplicationHandler.
+  pub(crate) fn try_purge_log(&mut self) {
+    log::debug!(
+      "try_purge_log: last_purged_log_id: {}, purge_upto: {}",
+      self.state.last_purged_log_id().display(),
+      self.state.purge_upto().display()
+    );
 
-        // The purge job may be postponed because a replication task is using them.
-        // Thus, we just try again to purge when progress is updated.
-        self.try_purge_log();
+    if self.state.purge_upto() <= self.state.last_purged_log_id() {
+      log::debug!("no need to purge, return");
+      return;
     }
 
-    /// Update replication streams to reflect replication progress change.
-    pub(crate) fn rebuild_replication_streams(&mut self, close_old: bool) {
-        let mut targets = vec![];
+    // Safe unwrap(): it greater than an Option thus it must be a Some()
+    let purge_upto = self.state.purge_upto().unwrap().clone();
 
-        let membership = self.state.membership_state.effective();
-
-        for item in self.leader.progress.iter_mut_without_reorder() {
-            if item.id != self.config.id {
-                if close_old {
-                    item.data.inflight = Inflight::None;
-                }
-
-                let target_node = membership.get_node(&item.id).unwrap().clone();
-
-                targets.push(TargetProgress {
-                    target: item.id.clone(),
-                    target_node,
-                    progress: item.clone(),
-                });
-            }
-        }
-        self.output
-            .push_command(Command::RebuildReplicationStreams {
-                leader_vote: self.leader.committed_vote.clone(),
-                targets,
-                close_old_streams: close_old,
-            });
+    // Check if any replication task is going to use the log that is going to purge.
+    let mut in_use = false;
+    for item in self.leader.progress.iter() {
+      if item.is_log_range_inflight(&purge_upto) {
+        log::debug!("log {} is in use by {}", purge_upto, item.id);
+        in_use = true;
+      }
     }
 
-    /// Initiate replication for every target that is not sending data in flight.
-    ///
-    /// `send_none` specifies whether to force to send a message even when there is no data to send.
-    pub(crate) fn initiate_replication(&mut self) {
-        log::debug!("{}: progress: {:?}", func_name!(), self.leader.progress);
-
-        for item in self.leader.progress.iter_mut_without_reorder() {
-            // TODO: update matching should be done here for leader
-            //       or updating matching should be queued in commands?
-            if item.id == self.config.id {
-                continue;
-            }
-
-            let target = item.id.clone();
-            let t = item.next_send(self.state, self.config.max_payload_entries);
-            log::debug!("next send: target: {}, send: {:?}", target, t);
-
-            match t {
-                Ok(inflight) => {
-                    let leader_vote = self.leader.committed_vote.clone();
-                    Self::send_to_target(self.output, leader_vote, &target, inflight);
-                }
-                Err(e) => {
-                    log::debug!(
-                        "no data to replicate for node-{}: current inflight: {:?}",
-                        target,
-                        e,
-                    );
-                }
-            }
-        }
+    if in_use {
+      // Logs to purge is in use, postpone purging.
+      log::debug!("cannot purge: {} is in use", purge_upto);
+      return;
     }
 
-    pub(crate) fn send_to_target(
-        output: &mut EngineOutput<C, SM>,
-        leader_vote: CommittedVoteOf<C>,
-        target: &C::NodeId,
-        inflight: &Inflight<C>,
-    ) {
-        match inflight {
-            Inflight::None => unreachable!("no data to send"),
-            Inflight::Logs {
-                log_id_range,
-                inflight_id,
-            } => {
-                let req = Replicate::new_logs(log_id_range.clone(), *inflight_id);
-                output.push_command(Command::Replicate {
-                    target: target.clone(),
-                    req,
-                });
-            }
-            Inflight::Snapshot { inflight_id } => {
-                output.push_command(Command::ReplicateSnapshot {
-                    leader_vote,
-                    target: target.clone(),
-                    inflight_id: *inflight_id,
-                });
-            }
-            Inflight::LogsSince { prev, inflight_id } => {
-                let req = Replicate::new_logs_since(prev.clone(), *inflight_id);
-                output.push_command(Command::Replicate {
-                    target: target.clone(),
-                    req,
-                });
-            }
-        };
+    self.log_handler().purge_log();
+  }
+
+  // TODO: replication handler should provide the same API for both locally and remotely log
+  // writing.       This may simplify upper level accessing.
+  /// Update the progress of local log to `upto`(inclusive).
+  ///
+  /// Writing to local log store does not have to wait for a replication response from remote
+  /// nodes. Thus, it can just be done in a fast-path.
+  pub(crate) fn update_local_progress(&mut self, upto: Option<LogIdOf<C>>) {
+    log::debug!("{}: upto: {}", func_name!(), upto.display());
+
+    if upto.is_none() {
+      return;
     }
 
-    /// Try to run a pending purge job if no tasks are using the logs to be purged.
-    ///
-    /// Purging logs involves concurrent log accesses by replication tasks and purging tasks.
-    /// Therefore, it is a method of ReplicationHandler.
-    pub(crate) fn try_purge_log(&mut self) {
-        log::debug!(
-            "try_purge_log: last_purged_log_id: {}, purge_upto: {}",
-            self.state.last_purged_log_id().display(),
-            self.state.purge_upto().display()
-        );
+    let id = self.config.id.clone();
 
-        if self.state.purge_upto() <= self.state.last_purged_log_id() {
-            log::debug!("no need to purge, return");
-            return;
-        }
+    // The leader may not be in membership anymore
+    if let Some(entry) = self.leader.progress.try_get(&id) {
+      log::debug!(
+        "update progress: self_matching: {}",
+        entry.matching().display()
+      );
 
-        // Safe unwrap(): it greater than an Option thus it must be a Some()
-        let purge_upto = self.state.purge_upto().unwrap().clone();
-
-        // Check if any replication task is going to use the log that is going to purge.
-        let mut in_use = false;
-        for item in self.leader.progress.iter() {
-            if item.is_log_range_inflight(&purge_upto) {
-                log::debug!("log {} is in use by {}", purge_upto, item.id);
-                in_use = true;
-            }
-        }
-
-        if in_use {
-            // Logs to purge is in use, postpone purging.
-            log::debug!("cannot purge: {} is in use", purge_upto);
-            return;
-        }
-
-        self.log_handler().purge_log();
+      if entry.matching() >= upto.as_ref() {
+        return;
+      }
     }
 
-    // TODO: replication handler should provide the same API for both locally and remotely log
-    // writing.       This may simplify upper level accessing.
-    /// Update the progress of local log to `upto`(inclusive).
-    ///
-    /// Writing to local log store does not have to wait for a replication response from remote
-    /// nodes. Thus, it can just be done in a fast-path.
-    pub(crate) fn update_local_progress(&mut self, upto: Option<LogIdOf<C>>) {
-        log::debug!("{}: upto: {}", func_name!(), upto.display());
+    let inflight_id = InflightId::new(0);
 
-        if upto.is_none() {
-            return;
-        }
-
-        let id = self.config.id.clone();
-
-        // The leader may not be in membership anymore
-        if let Some(entry) = self.leader.progress.try_get(&id) {
-            log::debug!(
-                "update progress: self_matching: {}",
-                entry.matching().display()
-            );
-
-            if entry.matching() >= upto.as_ref() {
-                return;
-            }
-        }
-
-        let inflight_id = InflightId::new(0);
-
-        if self
-            .leader
-            .progress
-            .update_data_with(&id, |data| {
-                // TODO: It should be self.state.last_log_id() but None is ok.
-                data.inflight = Inflight::logs(None, upto.clone(), inflight_id);
-            })
-            .is_some()
-        {
-            self.update_matching(id, upto, Some(inflight_id));
-        }
+    if self
+      .leader
+      .progress
+      .update_data_with(&id, |data| {
+        // TODO: It should be self.state.last_log_id() but None is ok.
+        data.inflight = Inflight::logs(None, upto.clone(), inflight_id);
+      })
+      .is_some()
+    {
+      self.update_matching(id, upto, Some(inflight_id));
     }
+  }
 
-    pub(crate) fn log_handler(&mut self) -> LogHandler<'_, C, SM> {
-        LogHandler::new(self.config, self.state, self.output)
-    }
+  pub(crate) fn log_handler(&mut self) -> LogHandler<'_, C, SM> {
+    LogHandler::new(self.config, self.state, self.output)
+  }
 }

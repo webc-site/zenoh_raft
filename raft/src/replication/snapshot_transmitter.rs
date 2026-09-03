@@ -1,29 +1,23 @@
 use display_more::DisplayOptionExt;
 use futures_util::FutureExt;
 
-use crate::RaftNetworkFactory;
-use crate::RaftTypeConfig;
-use crate::StorageError;
-use crate::core::sm::handle::SnapshotReader;
-use crate::errors::HigherVote;
-use crate::errors::RPCError;
-use crate::errors::ReplicationClosed;
-use crate::errors::ReplicationError;
-use crate::network::Backoff;
-use crate::network::NetBackoff;
-use crate::network::NetSnapshot;
-use crate::network::RPCOption;
-use crate::progress::inflight_id::InflightId;
-use crate::replication::EXHAUSTED_BACKOFF_DELAY;
-use crate::replication::replication_context::ReplicationContext;
-use crate::replication::response::ReplicationResult;
-use crate::replication::snapshot_transmitter_handle::SnapshotTransmitterHandle;
-use crate::storage::RaftStateMachine;
-use crate::type_config::TypeConfigExt;
-use crate::type_config::alias::SmSnapshotOf;
-use crate::type_config::alias::VoteOf;
-use crate::type_config::alias::WatchSenderOf;
-use crate::vote::raft_vote::RaftVoteExt;
+use crate::{
+  RaftNetworkFactory, RaftTypeConfig, StorageError,
+  core::sm::handle::SnapshotReader,
+  errors::{HigherVote, RPCError, ReplicationClosed, ReplicationError},
+  network::{Backoff, NetBackoff, NetSnapshot, RPCOption},
+  progress::inflight_id::InflightId,
+  replication::{
+    EXHAUSTED_BACKOFF_DELAY, replication_context::ReplicationContext, response::ReplicationResult,
+    snapshot_transmitter_handle::SnapshotTransmitterHandle,
+  },
+  storage::RaftStateMachine,
+  type_config::{
+    TypeConfigExt,
+    alias::{SmSnapshotOf, VoteOf, WatchSenderOf},
+  },
+  vote::raft_vote::RaftVoteExt,
+};
 
 /// Task that transmits a snapshot to a follower.
 ///
@@ -32,217 +26,221 @@ use crate::vote::raft_vote::RaftVoteExt;
 /// and notifies `RaftCore` of progress or errors via the notification channel.
 pub(crate) struct SnapshotTransmitter<C, N, SM = ()>
 where
-    C: RaftTypeConfig,
-    N: RaftNetworkFactory<C>,
-    N::Network: NetSnapshot<C, SnapshotData = SM::SnapshotData>,
-    SM: RaftStateMachine<C>,
+  C: RaftTypeConfig,
+  N: RaftNetworkFactory<C>,
+  N::Network: NetSnapshot<C, SnapshotData = SM::SnapshotData>,
+  SM: RaftStateMachine<C>,
 {
-    pub(crate) replication_context: ReplicationContext<C>,
+  pub(crate) replication_context: ReplicationContext<C>,
 
-    inflight_id: InflightId,
+  inflight_id: InflightId,
 
-    /// Network connection for snapshot replication.
-    ///
-    /// Snapshot transmitting is a long-running task and is processed in a separate task.
-    network: N::Network,
+  /// Network connection for snapshot replication.
+  ///
+  /// Snapshot transmitting is a long-running task and is processed in a separate task.
+  network: N::Network,
 
-    /// The backoff policy if an [`Unreachable`](`crate::error::Unreachable`) error is returned.
-    /// It will be reset to `None` when a successful response is received.
-    ///
-    /// This is deliberately not
-    /// [`BackoffState`](crate::replication::backoff_state::BackoffState), which log replication
-    /// uses: that one accumulates an error rank and backs off once the rank crosses a threshold,
-    /// so a `RemoteError` also throttles and the throttling persists across error kinds. Here
-    /// only [`Unreachable`](`crate::error::Unreachable`) throttles, and any other error clears it,
-    /// because a target that answers at all is worth retrying immediately.
-    backoff: Option<Backoff>,
+  /// The backoff policy if an [`Unreachable`](`crate::error::Unreachable`) error is returned.
+  /// It will be reset to `None` when a successful response is received.
+  ///
+  /// This is deliberately not
+  /// [`BackoffState`](crate::replication::backoff_state::BackoffState), which log replication
+  /// uses: that one accumulates an error rank and backs off once the rank crosses a threshold,
+  /// so a `RemoteError` also throttles and the throttling persists across error kinds. Here
+  /// only [`Unreachable`](`crate::error::Unreachable`) throttles, and any other error clears it,
+  /// because a target that answers at all is worth retrying immediately.
+  backoff: Option<Backoff>,
 
-    /// The handle to get a snapshot directly from the state machine.
-    snapshot_reader: SnapshotReader<C, SM>,
+  /// The handle to get a snapshot directly from the state machine.
+  snapshot_reader: SnapshotReader<C, SM>,
 }
 
 impl<C, N, SM> SnapshotTransmitter<C, N, SM>
 where
-    C: RaftTypeConfig,
-    N: RaftNetworkFactory<C>,
-    N::Network: NetSnapshot<C, SnapshotData = SM::SnapshotData>,
-    SM: RaftStateMachine<C>,
+  C: RaftTypeConfig,
+  N: RaftNetworkFactory<C>,
+  N::Network: NetSnapshot<C, SnapshotData = SM::SnapshotData>,
+  SM: RaftStateMachine<C>,
 {
-    pub(crate) fn spawn(
-        replication_context: ReplicationContext<C>,
-        network: N::Network,
-        snapshot_reader: SnapshotReader<C, SM>,
-        inflight_id: InflightId,
-        cancel_tx: WatchSenderOf<C, ()>,
-    ) -> SnapshotTransmitterHandle<C> {
-        let snapshot_transmit = Self {
-            replication_context,
-            inflight_id,
-            network,
-            backoff: None,
-            snapshot_reader,
-        };
+  pub(crate) fn spawn(
+    replication_context: ReplicationContext<C>,
+    network: N::Network,
+    snapshot_reader: SnapshotReader<C, SM>,
+    inflight_id: InflightId,
+    cancel_tx: WatchSenderOf<C, ()>,
+  ) -> SnapshotTransmitterHandle<C> {
+    let snapshot_transmit = Self {
+      replication_context,
+      inflight_id,
+      network,
+      backoff: None,
+      snapshot_reader,
+    };
 
-        // TODO: this function should just return join_handle and let the caller build
-        //       SnapshotTransmitterHandle
-        let join_handle = C::spawn(snapshot_transmit.stream_snapshot());
+    // TODO: this function should just return join_handle and let the caller build
+    //       SnapshotTransmitterHandle
+    let join_handle = C::spawn(snapshot_transmit.stream_snapshot());
 
-        SnapshotTransmitterHandle {
-            _join_handle: join_handle,
-            _tx_cancel: cancel_tx,
-        }
+    SnapshotTransmitterHandle {
+      _join_handle: join_handle,
+      _tx_cancel: cancel_tx,
     }
+  }
 
-    async fn stream_snapshot(mut self) {
-        log::info!("{}", func_name!());
+  async fn stream_snapshot(mut self) {
+    log::info!("{}", func_name!());
 
-        let mut ith: i32 = -1;
-        loop {
-            ith += 1;
+    let mut ith: i32 = -1;
+    loop {
+      ith += 1;
 
-            let res = self.read_and_send_snapshot(ith).await;
+      let res = self.read_and_send_snapshot(ith).await;
 
-            let error = match res {
-                Err(error) => error,
-                Ok(_) => {
-                    return;
-                }
-            };
-
-            log::error!("ReplicationError while sending snapshot: {}", error);
-
-            match error {
-                ReplicationError::Closed(closed) => {
-                    log::info!("snapshot transmission canceled: {}", closed);
-                    return;
-                }
-                ReplicationError::HigherVote(h) => {
-                    log::info!("snapshot transmission aborted, higher vote seen: {}", h);
-                    self.replication_context.notify_higher_vote(h.higher).await;
-                    return;
-                }
-                ReplicationError::StorageError(error) => {
-                    log::error!(
-                        "error replication to target: {}, error: {}",
-                        self.replication_context.target,
-                        error
-                    );
-                    self.replication_context.notify_storage_error(error).await;
-                    return;
-                }
-                ReplicationError::RPCError(err) => {
-                    match &err {
-                        RPCError::Unreachable(_) => {
-                            // If there is an [`Unreachable`] error, we will backoff for a
-                            // period of time. Backoff will be reset if there is a
-                            // successful RPC is sent.
-                            if self.backoff.is_none() {
-                                self.backoff = Some(self.network.backoff().unwrap_or_else(|| {
-                                    self.replication_context.config.build_backoff()
-                                }));
-                            }
-                        }
-                        RPCError::Timeout(_) | RPCError::Network(_) | RPCError::RemoteError(_) => {
-                            self.backoff = None;
-                        }
-                    };
-
-                    if let Some(b) = &mut self.backoff {
-                        let duration = b.next().unwrap_or_else(|| {
-                            log::warn!("backoff exhausted, using default");
-                            EXHAUSTED_BACKOFF_DELAY
-                        });
-
-                        let sleep = C::sleep(duration);
-                        let recv = self.replication_context.cancel_rx.changed();
-
-                        futures_util::select! {
-                            _ = sleep.fuse() => {
-                                log::debug!("backoff timeout");
-                            }
-                            _ = recv.fuse() => {
-                                log::info!("snapshot transmission canceled by RaftCore");
-                                return;
-                            }
-                        }
-                    }
-                }
-            };
+      let error = match res {
+        Err(error) => error,
+        Ok(_) => {
+          return;
         }
-    }
+      };
 
-    async fn read_and_send_snapshot(&mut self, ith: i32) -> Result<(), ReplicationError<C>> {
-        let snapshot: Option<SmSnapshotOf<C, SM>> =
-            SnapshotReader::<C, SM>::get_snapshot(&self.snapshot_reader)
-                .await
-                .map_err(|reason| {
-                    log::warn!("failed to get snapshot from state machine: {}", reason);
-                    ReplicationClosed::new(reason)
-                })?;
+      log::error!("ReplicationError while sending snapshot: {}", error);
 
-        log::info!(
-            "{}-th snapshot sending: has read snapshot: meta:{}",
-            ith,
-            snapshot.as_ref().map(|x| &x.meta).display()
-        );
-
-        let snapshot = match snapshot {
-            None => {
-                let sto_err =
-                    StorageError::read_snapshot(None, C::err_from_string("snapshot not found"));
-                return Err(sto_err.into());
+      match error {
+        ReplicationError::Closed(closed) => {
+          log::info!("snapshot transmission canceled: {}", closed);
+          return;
+        }
+        ReplicationError::HigherVote(h) => {
+          log::info!("snapshot transmission aborted, higher vote seen: {}", h);
+          self.replication_context.notify_higher_vote(h.higher).await;
+          return;
+        }
+        ReplicationError::StorageError(error) => {
+          log::error!(
+            "error replication to target: {}, error: {}",
+            self.replication_context.target,
+            error
+          );
+          self.replication_context.notify_storage_error(error).await;
+          return;
+        }
+        ReplicationError::RPCError(err) => {
+          match &err {
+            RPCError::Unreachable(_) => {
+              // If there is an [`Unreachable`] error, we will backoff for a
+              // period of time. Backoff will be reset if there is a
+              // successful RPC is sent.
+              if self.backoff.is_none() {
+                self.backoff = Some(
+                  self
+                    .network
+                    .backoff()
+                    .unwrap_or_else(|| self.replication_context.config.build_backoff()),
+                );
+              }
             }
-            Some(x) => x,
-        };
+            RPCError::Timeout(_) | RPCError::Network(_) | RPCError::RemoteError(_) => {
+              self.backoff = None;
+            }
+          };
 
-        let mut option = RPCOption::new(self.replication_context.config.install_snapshot_timeout());
-        option.snapshot_chunk_size =
-            Some(self.replication_context.config.snapshot_max_chunk_size as usize);
+          if let Some(b) = &mut self.backoff {
+            let duration = b.next().unwrap_or_else(|| {
+              log::warn!("backoff exhausted, using default");
+              EXHAUSTED_BACKOFF_DELAY
+            });
 
-        self.send_snapshot(snapshot, option).await
-    }
+            let sleep = C::sleep(duration);
+            let recv = self.replication_context.cancel_rx.changed();
 
-    async fn send_snapshot(
-        &mut self,
-        snapshot: SmSnapshotOf<C, SM>,
-        option: RPCOption,
-    ) -> Result<(), ReplicationError<C>> {
-        let meta = snapshot.meta.clone();
-
-        let mut c = self.replication_context.cancel_rx.clone();
-        let cancel = async move {
-            c.changed().await.ok();
-            ReplicationClosed::new("RaftCore is dropped")
-        };
-
-        let sender_vote: VoteOf<C> = self.replication_context.leader_vote.clone().into_vote();
-
-        let start_time = C::now();
-
-        let resp = self
-            .network
-            .full_snapshot(sender_vote.clone(), snapshot, cancel, option)
-            .await?;
-
-        log::info!("finished sending full_snapshot, resp: {}", resp);
-
-        // Handle response conditions.
-        if resp.vote.as_ref_vote() > sender_vote.as_ref_vote() {
-            return Err(ReplicationError::HigherVote(HigherVote {
-                higher: resp.vote,
-                sender_vote,
-            }));
+            futures_util::select! {
+                _ = sleep.fuse() => {
+                    log::debug!("backoff timeout");
+                }
+                _ = recv.fuse() => {
+                    log::info!("snapshot transmission canceled by RaftCore");
+                    return;
+                }
+            }
+          }
         }
-
-        self.replication_context
-            .notify_heartbeat_progress(start_time)
-            .await;
-        self.replication_context
-            .notify_progress(
-                Ok(ReplicationResult(Ok(meta.last_log_id))),
-                Some(self.inflight_id),
-            )
-            .await;
-        Ok(())
+      };
     }
+  }
+
+  async fn read_and_send_snapshot(&mut self, ith: i32) -> Result<(), ReplicationError<C>> {
+    let snapshot: Option<SmSnapshotOf<C, SM>> =
+      SnapshotReader::<C, SM>::get_snapshot(&self.snapshot_reader)
+        .await
+        .map_err(|reason| {
+          log::warn!("failed to get snapshot from state machine: {}", reason);
+          ReplicationClosed::new(reason)
+        })?;
+
+    log::info!(
+      "{}-th snapshot sending: has read snapshot: meta:{}",
+      ith,
+      snapshot.as_ref().map(|x| &x.meta).display()
+    );
+
+    let snapshot = match snapshot {
+      None => {
+        let sto_err = StorageError::read_snapshot(None, C::err_from_string("snapshot not found"));
+        return Err(sto_err.into());
+      }
+      Some(x) => x,
+    };
+
+    let mut option = RPCOption::new(self.replication_context.config.install_snapshot_timeout());
+    option.snapshot_chunk_size =
+      Some(self.replication_context.config.snapshot_max_chunk_size as usize);
+
+    self.send_snapshot(snapshot, option).await
+  }
+
+  async fn send_snapshot(
+    &mut self,
+    snapshot: SmSnapshotOf<C, SM>,
+    option: RPCOption,
+  ) -> Result<(), ReplicationError<C>> {
+    let meta = snapshot.meta.clone();
+
+    let mut c = self.replication_context.cancel_rx.clone();
+    let cancel = async move {
+      c.changed().await.ok();
+      ReplicationClosed::new("RaftCore is dropped")
+    };
+
+    let sender_vote: VoteOf<C> = self.replication_context.leader_vote.clone().into_vote();
+
+    let start_time = C::now();
+
+    let resp = self
+      .network
+      .full_snapshot(sender_vote.clone(), snapshot, cancel, option)
+      .await?;
+
+    log::info!("finished sending full_snapshot, resp: {}", resp);
+
+    // Handle response conditions.
+    if resp.vote.as_ref_vote() > sender_vote.as_ref_vote() {
+      return Err(ReplicationError::HigherVote(HigherVote {
+        higher: resp.vote,
+        sender_vote,
+      }));
+    }
+
+    self
+      .replication_context
+      .notify_heartbeat_progress(start_time)
+      .await;
+    self
+      .replication_context
+      .notify_progress(
+        Ok(ReplicationResult(Ok(meta.last_log_id))),
+        Some(self.inflight_id),
+      )
+      .await;
+    Ok(())
+  }
 }

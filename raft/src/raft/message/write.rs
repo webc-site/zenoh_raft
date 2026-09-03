@@ -1,9 +1,9 @@
-use crate::RaftTypeConfig;
-use crate::errors::ClientWriteError;
-use crate::errors::ForwardToLeader;
-use crate::raft::ClientWriteResponse;
-use crate::raft::ClientWriteResult;
-use crate::type_config::alias::LogIdOf;
+use crate::{
+  RaftTypeConfig,
+  errors::{ClientWriteError, ForwardToLeader},
+  raft::{ClientWriteResponse, ClientWriteResult},
+  type_config::alias::LogIdOf,
+};
 
 /// The result of a write operation, returned by [`Raft::client_write_many()`].
 ///
@@ -22,32 +22,32 @@ pub type WriteResult<C> = Result<WriteResponse<C>, ForwardToLeader<C>>;
 ///
 /// [`Raft::client_write_many()`]: crate::Raft::client_write_many
 pub struct WriteResponse<C: RaftTypeConfig> {
-    /// The log ID of the applied entry.
-    pub log_id: LogIdOf<C>,
+  /// The log ID of the applied entry.
+  pub log_id: LogIdOf<C>,
 
-    /// Application-defined response data.
-    pub response: C::R,
+  /// Application-defined response data.
+  pub response: C::R,
 }
 
 impl<C: RaftTypeConfig> From<ClientWriteResponse<C>> for WriteResponse<C> {
-    fn from(resp: ClientWriteResponse<C>) -> Self {
-        WriteResponse {
-            log_id: resp.log_id,
-            response: resp.data,
-        }
+  fn from(resp: ClientWriteResponse<C>) -> Self {
+    WriteResponse {
+      log_id: resp.log_id,
+      response: resp.data,
     }
+  }
 }
 
 /// Convert `ClientWriteResult` to `WriteResult`.
 pub(crate) fn into_write_result<C: RaftTypeConfig>(result: ClientWriteResult<C>) -> WriteResult<C> {
-    match result {
-        Ok(resp) => Ok(resp.into()),
-        Err(ClientWriteError::ForwardToLeader(e)) => Err(e),
-        Err(ClientWriteError::ChangeMembershipError(_)) => {
-            unreachable!("ChangeMembershipError should not occur for normal writes")
-        }
-        Err(ClientWriteError::PreconditionFailed(_)) => {
-            unreachable!("PreconditionFailed should not occur for normal writes")
-        }
+  match result {
+    Ok(resp) => Ok(resp.into()),
+    Err(ClientWriteError::ForwardToLeader(e)) => Err(e),
+    Err(ClientWriteError::ChangeMembershipError(_)) => {
+      unreachable!("ChangeMembershipError should not occur for normal writes")
     }
+    Err(ClientWriteError::PreconditionFailed(_)) => {
+      unreachable!("PreconditionFailed should not occur for normal writes")
+    }
+  }
 }

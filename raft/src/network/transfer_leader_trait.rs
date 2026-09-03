@@ -2,13 +2,12 @@
 
 use zenoh_raft_macros::add_async_trait;
 
-use crate::OptionalSend;
-use crate::OptionalSync;
-use crate::RaftTypeConfig;
-use crate::errors::RPCError;
-use crate::network::RPCOption;
-use crate::raft::message::TransferLeaderRequest;
-use crate::raft::message::TransferLeaderResponse;
+use crate::{
+  OptionalSend, OptionalSync, RaftTypeConfig,
+  errors::RPCError,
+  network::RPCOption,
+  raft::message::{TransferLeaderRequest, TransferLeaderResponse},
+};
 
 /// Sends TransferLeader messages to a target node.
 ///
@@ -21,16 +20,16 @@ use crate::raft::message::TransferLeaderResponse;
 #[add_async_trait]
 pub trait NetTransferLeader<C>: OptionalSend + OptionalSync + 'static
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    /// Send TransferLeader message to the target node.
-    ///
-    /// The node received this message should pass it to [`Raft::handle_transfer_leader()`].
-    ///
-    /// [`Raft::handle_transfer_leader()`]: crate::raft::Raft::handle_transfer_leader
-    async fn transfer_leader(
-        &mut self,
-        req: TransferLeaderRequest<C>,
-        option: RPCOption,
-    ) -> Result<TransferLeaderResponse<C>, RPCError<C>>;
+  /// Send TransferLeader message to the target node.
+  ///
+  /// The node received this message should pass it to [`Raft::handle_transfer_leader()`].
+  ///
+  /// [`Raft::handle_transfer_leader()`]: crate::raft::Raft::handle_transfer_leader
+  async fn transfer_leader(
+    &mut self,
+    req: TransferLeaderRequest<C>,
+    option: RPCOption,
+  ) -> Result<TransferLeaderResponse<C>, RPCError<C>>;
 }

@@ -1,341 +1,330 @@
 //! 基于 Zenoh 的 Raft 客户端网络实现
 
-use std::fmt::Display;
-use std::future::Future;
-use std::io::Cursor;
-use std::marker::PhantomData;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+  fmt::Display,
+  future::Future,
+  io::Cursor,
+  marker::PhantomData,
+  sync::Arc,
+  time::{Duration, Instant},
+};
 
-use crate::OptionalSend;
-use crate::RPCTypes;
-use crate::RaftTypeConfig;
-use crate::alias::EntryOf;
-use crate::alias::LogIdOf;
-use crate::alias::SnapshotMetaOf;
-use crate::alias::SnapshotOf;
-use crate::alias::VoteOf;
-use crate::errors::NetworkError;
-use crate::errors::RPCError;
-use crate::errors::ReplicationClosed;
-use crate::errors::StreamingError;
-use crate::errors::Timeout;
-use crate::errors::Unreachable;
-use crate::network::RPCOption;
-use crate::network::RaftNetwork;
-use crate::network::RaftNetworkFactory;
-use crate::network::zenoh::config::ZenohNetworkConfig;
-use crate::network::zenoh::wire::RPC_APPEND_ENTRIES;
-use crate::network::zenoh::wire::RPC_PRE_VOTE;
-use crate::network::zenoh::wire::RPC_SNAPSHOT;
-use crate::network::zenoh::wire::RPC_TRANSFER_LEADER;
-use crate::network::zenoh::wire::RPC_VOTE;
-use crate::network::zenoh::wire::WireAppendEntriesReq;
-use crate::network::zenoh::wire::WireAppendEntriesResp;
-use crate::network::zenoh::wire::WireSnapshotPayload;
-use crate::network::zenoh::wire::WireSnapshotResp;
-use crate::network::zenoh::wire::WireTransferLeaderErr;
-use crate::network::zenoh::wire::WireTransferLeaderReq;
-use crate::network::zenoh::wire::WireVoteReq;
-use crate::network::zenoh::wire::WireVoteResp;
-use crate::raft::AppendEntriesRequest;
-use crate::raft::AppendEntriesResponse;
-use crate::raft::SnapshotResponse;
-use crate::raft::TransferLeaderRequest;
-use crate::raft::TransferLeaderResponse;
-use crate::raft::VoteRequest;
-use crate::raft::VoteResponse;
+use anyerror::AnyError;
+use futures_util::FutureExt;
+use zenoh::key_expr::KeyExpr;
 
-enum RawRpcError<N> {
-    Network(String),
-    Unreachable(String),
-    Timeout {
-        action: RPCTypes,
-        target: N,
-        timeout: Duration,
-    },
-}
+use super::{
+  config::ZenohNetworkConfig,
+  wire::{
+    RPC_APPEND_ENTRIES, RPC_PRE_VOTE, RPC_SNAPSHOT, RPC_TRANSFER_LEADER, RPC_VOTE,
+    WireAppendEntriesReq, WireAppendEntriesResp, WireSnapshotPayload, WireSnapshotResp,
+    WireTransferLeaderErr, WireTransferLeaderReq, WireVoteReq, WireVoteResp,
+  },
+};
+use crate::{
+  OptionalSend, RPCTypes, RaftTypeConfig,
+  alias::{EntryOf, LogIdOf, SnapshotMetaOf, SnapshotOf, VoteOf},
+  errors::{NetworkError, RPCError, ReplicationClosed, StreamingError, Timeout, Unreachable},
+  network::{RPCOption, RaftNetwork, RaftNetworkFactory},
+  raft::{
+    AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, TransferLeaderRequest,
+    TransferLeaderResponse, VoteRequest, VoteResponse,
+  },
+};
 
-impl<N: Clone> RawRpcError<N> {
-    fn into_rpc_error<C: RaftTypeConfig<NodeId = N>>(self) -> RPCError<C> {
-        match self {
-            Self::Network(msg) => RPCError::Network(NetworkError::from_string(msg)),
-            Self::Unreachable(msg) => RPCError::Unreachable(Unreachable::from_string(msg)),
-            Self::Timeout {
-                action,
-                target,
-                timeout,
-            } => RPCError::Timeout(Timeout {
-                action,
-                id: target.clone(),
-                target,
-                timeout,
-            }),
-        }
-    }
-}
+const TIMEOUT_TOLERANCE: Duration = Duration::from_millis(15);
+const ERR_ZENOH_QUERY: &str = "Zenoh query error";
 
-/// 预计算的 Zenoh RPC 路由键，避免在热路径上进行字符串格式化与堆内存分配
+/// 预计算并编译的 Zenoh RPC 路由键，避免在热路径上进行字符串格式化、语法校验与堆内存分配
 #[derive(Clone, Debug)]
 pub struct ZenohRpcKeys {
-    pub append_entries: String,
-    pub vote: String,
-    pub pre_vote: String,
-    pub snapshot: String,
-    pub transfer_leader: String,
+  pub append_entries: KeyExpr<'static>,
+  pub vote: KeyExpr<'static>,
+  pub pre_vote: KeyExpr<'static>,
+  pub snapshot: KeyExpr<'static>,
+  pub transfer_leader: KeyExpr<'static>,
 }
 
 impl ZenohRpcKeys {
-    pub fn new(key_prefix: &str, target: &impl Display) -> Self {
-        let base_key = format!("{key_prefix}/{target}");
-        Self {
-            append_entries: format!("{base_key}/{RPC_APPEND_ENTRIES}"),
-            vote: format!("{base_key}/{RPC_VOTE}"),
-            pre_vote: format!("{base_key}/{RPC_PRE_VOTE}"),
-            snapshot: format!("{base_key}/{RPC_SNAPSHOT}"),
-            transfer_leader: format!("{base_key}/{RPC_TRANSFER_LEADER}"),
-        }
-    }
+  /// 尝试根据键前缀与目标节点构建预计算的 Zenoh RPC 路由键
+  pub fn try_new(key_prefix: &str, target: &impl Display) -> Result<Self, AnyError> {
+    let base_key = format!("{key_prefix}/{target}");
+    Ok(Self {
+      append_entries: KeyExpr::try_from(format!("{base_key}/{RPC_APPEND_ENTRIES}"))
+        .map_err(|e| AnyError::error(format!("invalid key_expr for append_entries: {e}")))?,
+      vote: KeyExpr::try_from(format!("{base_key}/{RPC_VOTE}"))
+        .map_err(|e| AnyError::error(format!("invalid key_expr for vote: {e}")))?,
+      pre_vote: KeyExpr::try_from(format!("{base_key}/{RPC_PRE_VOTE}"))
+        .map_err(|e| AnyError::error(format!("invalid key_expr for pre_vote: {e}")))?,
+      snapshot: KeyExpr::try_from(format!("{base_key}/{RPC_SNAPSHOT}"))
+        .map_err(|e| AnyError::error(format!("invalid key_expr for snapshot: {e}")))?,
+      transfer_leader: KeyExpr::try_from(format!("{base_key}/{RPC_TRANSFER_LEADER}"))
+        .map_err(|e| AnyError::error(format!("invalid key_expr for transfer_leader: {e}")))?,
+    })
+  }
+
+  /// 根据键前缀与目标节点构建预计算的 Zenoh RPC 路由键
+  #[inline]
+  pub fn new(key_prefix: &str, target: &impl Display) -> Self {
+    Self::try_new(key_prefix, target).expect("valid key_expr for ZenohRpcKeys")
+  }
 }
 
 /// 基于 Zenoh 的 Raft 网络工厂
 #[derive(Clone)]
 pub struct ZenohNetworkFactory<C: RaftTypeConfig> {
-    session: Arc<zenoh::Session>,
-    config: ZenohNetworkConfig,
-    _marker: PhantomData<C>,
+  session: Arc<zenoh::Session>,
+  config: ZenohNetworkConfig,
+  _marker: PhantomData<C>,
 }
 
 impl<C: RaftTypeConfig> ZenohNetworkFactory<C> {
-    /// 创建新的 Zenoh 网络工厂
-    pub fn new(session: Arc<zenoh::Session>, config: ZenohNetworkConfig) -> Self {
-        Self {
-            session,
-            config,
-            _marker: PhantomData,
-        }
+  /// 创建新的 Zenoh 网络工厂
+  pub fn new(session: Arc<zenoh::Session>, config: ZenohNetworkConfig) -> Self {
+    Self {
+      session,
+      config,
+      _marker: PhantomData,
     }
+  }
 
-    /// 获取底层 Zenoh 会话引用
-    pub fn session(&self) -> &Arc<zenoh::Session> {
-        &self.session
-    }
+  /// 获取底层 Zenoh 会话引用
+  pub fn session(&self) -> &Arc<zenoh::Session> {
+    &self.session
+  }
 
-    /// 获取网络配置引用
-    pub fn config(&self) -> &ZenohNetworkConfig {
-        &self.config
-    }
+  /// 获取网络配置引用
+  pub fn config(&self) -> &ZenohNetworkConfig {
+    &self.config
+  }
 }
 
 impl<C: RaftTypeConfig> RaftNetworkFactory<C> for ZenohNetworkFactory<C>
 where
-    C::NodeId: Display + bitcode::Encode + for<'a> bitcode::Decode<'a>,
-    EntryOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
-    VoteOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
-    LogIdOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
-    SnapshotMetaOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
+  C::NodeId: Display + bitcode::Encode + for<'a> bitcode::Decode<'a>,
+  EntryOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
+  VoteOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
+  LogIdOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
+  SnapshotMetaOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
 {
-    type Network = ZenohNetwork<C>;
+  type Network = ZenohNetwork<C>;
 
-    async fn new_client(&mut self, target: C::NodeId, _node: &C::Node) -> Self::Network {
-        let keys = ZenohRpcKeys::new(&self.config.key_prefix, &target);
-        ZenohNetwork {
-            target,
-            keys,
-            session: self.session.clone(),
-            config: self.config.clone(),
-            _marker: PhantomData,
-        }
+  async fn new_client(&mut self, target: C::NodeId, _node: &C::Node) -> Self::Network {
+    let keys = ZenohRpcKeys::new(&self.config.key_prefix, &target);
+    ZenohNetwork {
+      target,
+      keys,
+      session: self.session.clone(),
+      config: self.config.clone(),
+      _marker: PhantomData,
     }
+  }
 }
 
 /// 基于 Zenoh 的目标节点 Raft 网络客户端
 pub struct ZenohNetwork<C: RaftTypeConfig> {
-    target: C::NodeId,
-    keys: ZenohRpcKeys,
-    session: Arc<zenoh::Session>,
-    config: ZenohNetworkConfig,
-    _marker: PhantomData<C>,
+  target: C::NodeId,
+  keys: ZenohRpcKeys,
+  session: Arc<zenoh::Session>,
+  config: ZenohNetworkConfig,
+  _marker: PhantomData<C>,
 }
 
-impl<C: RaftTypeConfig> ZenohNetwork<C>
-where
-    C::NodeId: Display,
-{
-    async fn send_raw_query<Req, Resp>(
-        &self,
-        key: &str,
-        action: RPCTypes,
-        option: &RPCOption,
-        req: &Req,
-    ) -> Result<Resp, RawRpcError<C::NodeId>>
-    where
-        Req: bitcode::Encode,
-        Resp: for<'a> bitcode::Decode<'a>,
-    {
-        let timeout = option.soft_ttl();
-        let payload = bitcode::encode(req);
+impl<C: RaftTypeConfig> ZenohNetwork<C> {
+  async fn send_query<Req, Resp>(
+    &self,
+    key: &KeyExpr<'_>,
+    action: RPCTypes,
+    option: &RPCOption,
+    req: &Req,
+  ) -> Result<Resp, RPCError<C>>
+  where
+    Req: bitcode::Encode,
+    Resp: for<'a> bitcode::Decode<'a>,
+  {
+    let timeout = option.soft_ttl();
+    let payload = bitcode::encode(req);
+    let start = Instant::now();
 
-        let replies = self
-            .session
-            .get(key)
-            .payload(payload)
-            .target(self.config.query_target)
-            .timeout(timeout)
-            .await
-            .map_err(|e| RawRpcError::Unreachable(e.to_string()))?;
+    let replies = self
+      .session
+      .get(key)
+      .payload(payload)
+      .target(self.config.query_target)
+      .timeout(timeout)
+      .await
+      .map_err(|e| RPCError::Unreachable(Unreachable::from_string(e.to_string())))?;
 
-        if let Ok(reply) = replies.recv_async().await {
-            match reply.result() {
-                Ok(sample) => {
-                    let bytes = sample.payload().to_bytes();
-                    let resp: Resp =
-                        bitcode::decode(&bytes).map_err(|e| RawRpcError::Network(e.to_string()))?;
-                    return Ok(resp);
-                }
-                Err(err) => {
-                    let err_str = err
-                        .payload()
-                        .try_to_string()
-                        .map(|s| s.into_owned())
-                        .unwrap_or_else(|_| "Zenoh query error".to_string());
-                    return Err(RawRpcError::Unreachable(err_str));
-                }
-            }
+    if let Ok(reply) = replies.recv_async().await {
+      match reply.result() {
+        Ok(sample) => {
+          let bytes = sample.payload().to_bytes();
+          let resp: Resp = bitcode::decode(&bytes)
+            .map_err(|e| RPCError::Network(NetworkError::from_string(e.to_string())))?;
+          return Ok(resp);
         }
-
-        Err(RawRpcError::Timeout {
-            action,
-            target: self.target.clone(),
-            timeout,
-        })
+        Err(err) => {
+          let err_str = err.payload().try_to_string().map_or_else(
+            |_| ERR_ZENOH_QUERY.to_string(),
+            std::borrow::Cow::into_owned,
+          );
+          return Err(RPCError::Unreachable(Unreachable::from_string(err_str)));
+        }
+      }
     }
 
-    async fn send_query<Req, Resp>(
-        &self,
-        key: &str,
-        action: RPCTypes,
-        option: &RPCOption,
-        req: &Req,
-    ) -> Result<Resp, RPCError<C>>
-    where
-        Req: bitcode::Encode,
-        Resp: for<'a> bitcode::Decode<'a>,
-    {
-        self.send_raw_query(key, action, option, req)
-            .await
-            .map_err(|e| e.into_rpc_error())
+    let elapsed = start.elapsed();
+    // 严谨区分超时与不可达：如果通道在远小于超时时间前关闭，说明目标节点离线或未注册 Queryable，
+    // 应返回 Unreachable 从而触发 OpenRaft 的 Backoff（rank 100）机制，避免对离线节点高频空转重试。
+    if elapsed + TIMEOUT_TOLERANCE >= timeout {
+      Err(RPCError::Timeout(Timeout {
+        action,
+        id: self.target.clone(),
+        target: self.target.clone(),
+        timeout,
+      }))
+    } else {
+      Err(RPCError::Unreachable(Unreachable::from_string(format!(
+        "target node {} unreachable: query channel closed after {elapsed:?}",
+        self.target
+      ))))
     }
-
-    async fn send_streaming_query<Req, Resp>(
-        &self,
-        key: &str,
-        action: RPCTypes,
-        option: &RPCOption,
-        req: &Req,
-    ) -> Result<Resp, StreamingError<C>>
-    where
-        Req: bitcode::Encode,
-        Resp: for<'a> bitcode::Decode<'a>,
-    {
-        self.send_query(key, action, option, req)
-            .await
-            .map_err(Into::into)
-    }
+  }
 }
 
 impl<C: RaftTypeConfig> RaftNetwork<C> for ZenohNetwork<C>
 where
-    C::NodeId: Display + bitcode::Encode + for<'a> bitcode::Decode<'a>,
-    EntryOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
-    VoteOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
-    LogIdOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
-    SnapshotMetaOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
+  C::NodeId: Display + bitcode::Encode + for<'a> bitcode::Decode<'a>,
+  EntryOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
+  VoteOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
+  LogIdOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
+  SnapshotMetaOf<C>: bitcode::Encode + for<'a> bitcode::Decode<'a>,
 {
-    type SnapshotData = Cursor<Vec<u8>>;
+  type SnapshotData = Cursor<Vec<u8>>;
 
-    async fn append_entries(
-        &mut self,
-        rpc: AppendEntriesRequest<C>,
-        option: RPCOption,
-    ) -> Result<AppendEntriesResponse<C>, RPCError<C>> {
-        let wire_req = WireAppendEntriesReq::from(rpc);
-        let wire_resp: WireAppendEntriesResp<VoteOf<C>, LogIdOf<C>> = self
-            .send_query(
-                &self.keys.append_entries,
-                RPCTypes::AppendEntries,
-                &option,
-                &wire_req,
-            )
-            .await?;
+  async fn append_entries(
+    &mut self,
+    rpc: AppendEntriesRequest<C>,
+    option: RPCOption,
+  ) -> Result<AppendEntriesResponse<C>, RPCError<C>> {
+    let wire_req = WireAppendEntriesReq::from(rpc);
+    let wire_resp: WireAppendEntriesResp<VoteOf<C>, LogIdOf<C>> = self
+      .send_query(
+        &self.keys.append_entries,
+        RPCTypes::AppendEntries,
+        &option,
+        &wire_req,
+      )
+      .await?;
+    Ok(wire_resp.into())
+  }
+
+  async fn vote(
+    &mut self,
+    rpc: VoteRequest<C>,
+    option: RPCOption,
+  ) -> Result<VoteResponse<C>, RPCError<C>> {
+    let wire_req = WireVoteReq::from(rpc);
+    let wire_resp: WireVoteResp<VoteOf<C>, LogIdOf<C>> = self
+      .send_query(&self.keys.vote, RPCTypes::Vote, &option, &wire_req)
+      .await?;
+    Ok(wire_resp.into())
+  }
+
+  async fn pre_vote(
+    &mut self,
+    mut rpc: VoteRequest<C>,
+    option: RPCOption,
+  ) -> Result<VoteResponse<C>, RPCError<C>> {
+    rpc.is_pre_vote = true;
+    let wire_req = WireVoteReq::from(rpc);
+    let wire_resp: WireVoteResp<VoteOf<C>, LogIdOf<C>> = self
+      .send_query(&self.keys.pre_vote, RPCTypes::Vote, &option, &wire_req)
+      .await?;
+    Ok(wire_resp.into())
+  }
+
+  async fn full_snapshot(
+    &mut self,
+    vote: VoteOf<C>,
+    snapshot: SnapshotOf<C, Self::SnapshotData>,
+    cancel: impl Future<Output = ReplicationClosed> + OptionalSend + 'static,
+    option: RPCOption,
+  ) -> Result<SnapshotResponse<C>, StreamingError<C>> {
+    let wire_payload = WireSnapshotPayload {
+      vote,
+      meta: snapshot.meta,
+      data: snapshot.snapshot.into_inner(),
+    };
+
+    let send_fut = self.send_query(
+      &self.keys.snapshot,
+      RPCTypes::InstallSnapshot,
+      &option,
+      &wire_payload,
+    );
+
+    futures_util::pin_mut!(cancel);
+    futures_util::pin_mut!(send_fut);
+
+    futures_util::select! {
+      closed = cancel.fuse() => Err(StreamingError::Closed(closed)),
+      res = send_fut.fuse() => {
+        let wire_resp: WireSnapshotResp<VoteOf<C>> = res?;
         Ok(wire_resp.into())
+      }
     }
+  }
 
-    async fn vote(
-        &mut self,
-        rpc: VoteRequest<C>,
-        option: RPCOption,
-    ) -> Result<VoteResponse<C>, RPCError<C>> {
-        let wire_req = WireVoteReq::from(rpc);
-        let wire_resp: WireVoteResp<VoteOf<C>, LogIdOf<C>> = self
-            .send_query(&self.keys.vote, RPCTypes::Vote, &option, &wire_req)
-            .await?;
-        Ok(wire_resp.into())
-    }
+  async fn transfer_leader(
+    &mut self,
+    req: TransferLeaderRequest<C>,
+    option: RPCOption,
+  ) -> Result<TransferLeaderResponse<C>, RPCError<C>> {
+    let wire_req = WireTransferLeaderReq::from(req);
+    let wire_res: Result<(), WireTransferLeaderErr<VoteOf<C>, LogIdOf<C>>> = self
+      .send_query(
+        &self.keys.transfer_leader,
+        RPCTypes::TransferLeader,
+        &option,
+        &wire_req,
+      )
+      .await?;
 
-    async fn pre_vote(
-        &mut self,
-        mut rpc: VoteRequest<C>,
-        option: RPCOption,
-    ) -> Result<VoteResponse<C>, RPCError<C>> {
-        rpc.is_pre_vote = true;
-        let wire_req = WireVoteReq::from(rpc);
-        let wire_resp: WireVoteResp<VoteOf<C>, LogIdOf<C>> = self
-            .send_query(&self.keys.pre_vote, RPCTypes::Vote, &option, &wire_req)
-            .await?;
-        Ok(wire_resp.into())
-    }
+    Ok(wire_res.map_err(Into::into))
+  }
+}
 
-    async fn full_snapshot(
-        &mut self,
-        vote: VoteOf<C>,
-        snapshot: SnapshotOf<C, Self::SnapshotData>,
-        _cancel: impl Future<Output = ReplicationClosed> + OptionalSend + 'static,
-        option: RPCOption,
-    ) -> Result<SnapshotResponse<C>, StreamingError<C>> {
-        let wire_payload = WireSnapshotPayload {
-            vote,
-            meta: snapshot.meta,
-            data: snapshot.snapshot.into_inner(),
-        };
+#[cfg(test)]
+mod tests {
+  use super::*;
 
-        let wire_resp: WireSnapshotResp<VoteOf<C>> = self
-            .send_streaming_query(
-                &self.keys.snapshot,
-                RPCTypes::InstallSnapshot,
-                &option,
-                &wire_payload,
-            )
-            .await?;
+  #[test]
+  fn test_zenoh_rpc_keys_generation() {
+    let keys = ZenohRpcKeys::try_new("test_cluster", &10).expect("generate keys");
+    assert_eq!(
+      keys.append_entries.as_str(),
+      "test_cluster/10/append_entries"
+    );
+    assert_eq!(keys.vote.as_str(), "test_cluster/10/vote");
+    assert_eq!(keys.pre_vote.as_str(), "test_cluster/10/pre_vote");
+    assert_eq!(keys.snapshot.as_str(), "test_cluster/10/snapshot");
+    assert_eq!(
+      keys.transfer_leader.as_str(),
+      "test_cluster/10/transfer_leader"
+    );
 
-        Ok(wire_resp.into())
-    }
+    let keys_new = ZenohRpcKeys::new("test_cluster", &10);
+    assert_eq!(
+      keys_new.append_entries.as_str(),
+      keys.append_entries.as_str()
+    );
+  }
 
-    async fn transfer_leader(
-        &mut self,
-        req: TransferLeaderRequest<C>,
-        option: RPCOption,
-    ) -> Result<TransferLeaderResponse<C>, RPCError<C>> {
-        let wire_req = WireTransferLeaderReq::from(req);
-        let wire_res: Result<(), WireTransferLeaderErr<VoteOf<C>, LogIdOf<C>>> = self
-            .send_query(
-                &self.keys.transfer_leader,
-                RPCTypes::TransferLeader,
-                &option,
-                &wire_req,
-            )
-            .await?;
-
-        Ok(wire_res.map_err(Into::into))
-    }
+  #[test]
+  fn test_zenoh_rpc_keys_invalid() {
+    // Key expressions cannot contain '$' as non-wildcard
+    let err = ZenohRpcKeys::try_new("test$cluster", &10);
+    assert!(err.is_err());
+  }
 }

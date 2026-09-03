@@ -1,5 +1,4 @@
-use crate::log_id::LogId;
-use crate::vote::RaftCommittedLeaderId;
+use crate::{log_id::LogId, vote::RaftCommittedLeaderId};
 
 /// A small piece of information for identifying a snapshot and error tracing.
 ///
@@ -28,31 +27,30 @@ use crate::vote::RaftCommittedLeaderId;
 #[derive(Debug, Clone, PartialEq, Eq, bitcode::Encode, bitcode::Decode)]
 pub struct SnapshotSignature<CLID>
 where
-    CLID: RaftCommittedLeaderId,
+  CLID: RaftCommittedLeaderId,
 {
-    /// Log entries up to which this snapshot includes, inclusive.
-    pub last_log_id: Option<LogId<CLID>>,
+  /// Log entries up to which this snapshot includes, inclusive.
+  pub last_log_id: Option<LogId<CLID>>,
 
-    /// The last applied membership log id.
-    pub last_membership_log_id: Option<Box<LogId<CLID>>>,
+  /// The last applied membership log id.
+  pub last_membership_log_id: Option<Box<LogId<CLID>>>,
 }
 
 #[cfg(test)]
 mod tests {
 
-    #[test]
-    fn test_snapshot_signature_bitcode() {
-        use super::SnapshotSignature;
-        use crate::engine::testing::UtClid;
-        use crate::engine::testing::log_id;
+  #[test]
+  fn test_snapshot_signature_bitcode() {
+    use super::SnapshotSignature;
+    use crate::engine::testing::{UtClid, log_id};
 
-        let sig = SnapshotSignature::<UtClid> {
-            last_log_id: Some(log_id(1, 2, 3)),
-            last_membership_log_id: Some(Box::new(log_id(4, 5, 6))),
-        };
+    let sig = SnapshotSignature::<UtClid> {
+      last_log_id: Some(log_id(1, 2, 3)),
+      last_membership_log_id: Some(Box::new(log_id(4, 5, 6))),
+    };
 
-        let bytes = bitcode::encode(&sig);
-        let decoded: SnapshotSignature<UtClid> = bitcode::decode(&bytes).unwrap();
-        assert_eq!(sig, decoded);
-    }
+    let bytes = bitcode::encode(&sig);
+    let decoded: SnapshotSignature<UtClid> = bitcode::decode(&bytes).unwrap();
+    assert_eq!(sig, decoded);
+  }
 }

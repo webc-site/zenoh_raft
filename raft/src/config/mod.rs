@@ -44,8 +44,7 @@ mod step_down_policy;
 #[cfg(test)]
 mod config_test;
 
-pub use config_impl::Config;
-pub use config_impl::SnapshotPolicy;
+pub use config_impl::{Config, SnapshotPolicy};
 pub use error::ConfigError;
 pub(crate) use runtime_config::RuntimeConfig;
 pub use step_down_policy::StepDownPolicy;

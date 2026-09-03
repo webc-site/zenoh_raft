@@ -1,7 +1,7 @@
-use crate::RaftTypeConfig;
-use crate::errors::Fatal;
-use crate::errors::Infallible;
-use crate::errors::RaftError;
+use crate::{
+  RaftTypeConfig,
+  errors::{Fatal, Infallible, RaftError},
+};
 
 /// Convert a `Result<_, Fatal<C>>` to a `Result<T, RaftError<C, E>>`
 ///
@@ -17,31 +17,31 @@ use crate::errors::RaftError;
 /// and application-specific errors.
 pub(crate) trait IntoRaftResult<C, T, E>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    /// Convert a `Result<Result<T, E>, Fatal<C>>` or `Result<T, Fatal<C>>` to a
-    /// `Result<T, RaftError<C, E>>`.
-    fn into_raft_result(self) -> Result<T, RaftError<C, E>>;
+  /// Convert a `Result<Result<T, E>, Fatal<C>>` or `Result<T, Fatal<C>>` to a
+  /// `Result<T, RaftError<C, E>>`.
+  fn into_raft_result(self) -> Result<T, RaftError<C, E>>;
 }
 
 impl<C, T, E> IntoRaftResult<C, T, E> for Result<Result<T, E>, Fatal<C>>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    fn into_raft_result(self) -> Result<T, RaftError<C, E>> {
-        match self {
-            Ok(Ok(t)) => Ok(t),
-            Ok(Err(e)) => Err(RaftError::APIError(e)),
-            Err(f) => Err(RaftError::Fatal(f)),
-        }
+  fn into_raft_result(self) -> Result<T, RaftError<C, E>> {
+    match self {
+      Ok(Ok(t)) => Ok(t),
+      Ok(Err(e)) => Err(RaftError::APIError(e)),
+      Err(f) => Err(RaftError::Fatal(f)),
     }
+  }
 }
 
 impl<C, T> IntoRaftResult<C, T, Infallible> for Result<T, Fatal<C>>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    fn into_raft_result(self) -> Result<T, RaftError<C>> {
-        self.map_err(RaftError::Fatal)
-    }
+  fn into_raft_result(self) -> Result<T, RaftError<C>> {
+    self.map_err(RaftError::Fatal)
+  }
 }

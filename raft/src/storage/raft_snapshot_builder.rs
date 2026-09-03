@@ -2,10 +2,7 @@ use std::io;
 
 use zenoh_raft_macros::add_async_trait;
 
-use crate::OptionalSend;
-use crate::OptionalSync;
-use crate::RaftTypeConfig;
-use crate::type_config::alias::SnapshotOf;
+use crate::{OptionalSend, OptionalSync, RaftTypeConfig, type_config::alias::SnapshotOf};
 /// A trait defining the interface for a Raft state machine snapshot subsystem.
 ///
 /// This interface is accessed read-only from a snapshot-building task.
@@ -19,24 +16,24 @@ use crate::type_config::alias::SnapshotOf;
 #[add_async_trait]
 pub trait RaftSnapshotBuilder<C>: OptionalSend + OptionalSync + 'static
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    /// Snapshot data this builder produces.
-    type SnapshotData: OptionalSend + 'static;
+  /// Snapshot data this builder produces.
+  type SnapshotData: OptionalSend + 'static;
 
-    /// Build snapshot
-    ///
-    /// A snapshot has to contain state of all applied logs, including membership. Usually it is
-    /// just a serialized state machine.
-    ///
-    /// Building snapshot can be done by:
-    /// - Performing log compaction, e.g., merge log entries that operate on the same key, like an
-    ///   LSM-tree does,
-    /// - or by fetching a snapshot from the state machine.
-    async fn build_snapshot(&mut self) -> Result<SnapshotOf<C, Self::SnapshotData>, io::Error>;
+  /// Build snapshot
+  ///
+  /// A snapshot has to contain state of all applied logs, including membership. Usually it is
+  /// just a serialized state machine.
+  ///
+  /// Building snapshot can be done by:
+  /// - Performing log compaction, e.g., merge log entries that operate on the same key, like an
+  ///   LSM-tree does,
+  /// - or by fetching a snapshot from the state machine.
+  async fn build_snapshot(&mut self) -> Result<SnapshotOf<C, Self::SnapshotData>, io::Error>;
 
-    // NOTES:
-    // This interface is geared toward small file-based snapshots. However, not all snapshots can
-    // be easily represented as a file. Probably a more generic interface will be needed to address
-    // also other needs.
+  // NOTES:
+  // This interface is geared toward small file-based snapshots. However, not all snapshots can
+  // be easily represented as a file. Probably a more generic interface will be needed to address
+  // also other needs.
 }

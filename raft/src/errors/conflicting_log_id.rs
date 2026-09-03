@@ -1,5 +1,4 @@
-use crate::RaftTypeConfig;
-use crate::type_config::alias::LogIdOf;
+use crate::{RaftTypeConfig, type_config::alias::LogIdOf};
 
 /// The follower's log does not match the leader's at the given index.
 ///
@@ -8,6 +7,6 @@ use crate::type_config::alias::LogIdOf;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("conflicting log-id: local={local:?} should be: {expect:?}")]
 pub struct ConflictingLogId<C: RaftTypeConfig> {
-    pub expect: LogIdOf<C>,
-    pub local: Option<LogIdOf<C>>,
+  pub expect: LogIdOf<C>,
+  pub local: Option<LogIdOf<C>>,
 }

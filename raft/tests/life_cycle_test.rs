@@ -2,642 +2,625 @@
 
 mod fixtures;
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
-use maplit::btreemap;
-use maplit::btreeset;
-use zenoh_raft::Config;
-use zenoh_raft::RaftLogReader;
-use zenoh_raft::ServerState;
-use zenoh_raft::Vote;
-use zenoh_raft::metrics::WaitError;
-use zenoh_raft::storage::RaftLogStorage;
-use zenoh_raft::storage::RaftStateMachine;
-use zenoh_raft::testing::memstore::ClientRequest;
-use zenoh_raft::testing::memstore::IntoMemClientRequest;
-
-use fixtures::MemLogStore;
-use fixtures::MemRaft;
-use fixtures::MemStateMachine;
-use fixtures::RaftRouter;
-use fixtures::log_id;
-use fixtures::timeout;
+use fixtures::{MemLogStore, MemRaft, MemStateMachine, RaftRouter, log_id, timeout};
+use maplit::{btreemap, btreeset};
+use zenoh_raft::{
+  Config, RaftLogReader, ServerState, Vote,
+  metrics::WaitError,
+  storage::{RaftLogStorage, RaftStateMachine},
+  testing::memstore::{ClientRequest, IntoMemClientRequest},
+};
 
 /// 节点初始化测试
 #[compio::test]
 async fn test_initialization() -> Result<()> {
-    let config = Arc::new(
-        Config {
-            enable_heartbeat: false,
-            ..Default::default()
-        }
-        .validate()?,
-    );
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
 
-    let mut router = RaftRouter::new(config.clone());
-    router.new_raft_node(0).await;
+  let mut router = RaftRouter::new(config.clone());
+  router.new_raft_node(0).await;
 
-    router
-        .wait(&0, timeout())
-        .state(ServerState::Learner, "starts as learner")
-        .await?;
+  router
+    .wait(&0, timeout())
+    .state(ServerState::Learner, "starts as learner")
+    .await?;
 
-    router.initialize(0).await?;
+  router.initialize(0).await?;
 
-    router
-        .wait(&0, timeout())
-        .state(ServerState::Leader, "becomes leader after init")
-        .await?;
-    router
-        .wait(&0, timeout())
-        .applied_index(Some(1), "init log applied")
-        .await?;
+  router
+    .wait(&0, timeout())
+    .state(ServerState::Leader, "becomes leader after init")
+    .await?;
+  router
+    .wait(&0, timeout())
+    .applied_index(Some(1), "init log applied")
+    .await?;
 
-    Ok(())
+  Ok(())
 }
 
 /// 节点安全停机测试
 #[compio::test]
 async fn test_shutdown() -> Result<()> {
-    let config = Arc::new(
-        Config {
-            enable_heartbeat: false,
-            enable_elect: false,
-            ..Default::default()
-        }
-        .validate()?,
-    );
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_elect: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
 
-    let mut router = RaftRouter::new(config.clone());
-    router
-        .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
-        .await?;
+  let mut router = RaftRouter::new(config.clone());
+  router
+    .new_cluster(btreeset! {0, 1, 2}, btreeset! {})
+    .await?;
 
-    let n0 = router.get_raft_handle(&0)?;
-    n0.shutdown().await?;
+  let n0 = router.get_raft_handle(&0)?;
+  n0.shutdown().await?;
 
-    let res = n0.client_write(ClientRequest::make_request("foo", 1)).await;
-    assert!(res.is_err(), "writes to shutdown node must fail");
+  let res = n0.client_write(ClientRequest::make_request("foo", 1)).await;
+  assert!(res.is_err(), "writes to shutdown node must fail");
 
-    Ok(())
+  Ok(())
 }
 
 /// 单节点重启与状态恢复测试
 #[compio::test]
 async fn test_single_node_restart() -> Result<()> {
-    let config = Arc::new(
-        Config {
-            enable_heartbeat: false,
-            enable_elect: false,
-            ..Default::default()
-        }
-        .validate()?,
-    );
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_elect: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
 
-    let mut router = RaftRouter::new(config.clone());
-    let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
+  let mut router = RaftRouter::new(config.clone());
+  let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
 
-    router.client_request(0, "client", 1).await?;
-    log_index += 1;
+  router.client_request(0, "client", 1).await?;
+  log_index += 1;
 
-    let (_r0, sto0, sm0) = router.remove_node(0).unwrap();
+  let (_r0, sto0, sm0) = router.remove_node(0).unwrap();
 
-    router
-        .new_raft_node_with_sto(0, sto0.clone(), sm0.clone())
-        .await;
+  router
+    .new_raft_node_with_sto(0, sto0.clone(), sm0.clone())
+    .await;
 
-    let (_sto, mut sm) = (sto0, sm0);
-    let (last_applied, _) = sm.applied_state().await?;
-    assert_eq!(Some(log_id(1, 0, log_index)), last_applied);
+  let (_sto, mut sm) = (sto0, sm0);
+  let (last_applied, _) = sm.applied_state().await?;
+  assert_eq!(Some(log_id(1, 0, log_index)), last_applied);
 
-    router
-        .wait(&0, timeout())
-        .applied_index(Some(log_index), "state restored")
-        .await?;
+  router
+    .wait(&0, timeout())
+    .applied_index(Some(log_index), "state restored")
+    .await?;
 
-    Ok(())
+  Ok(())
 }
 
 /// Follower 重启后不会因过快选举而打断稳定的集群
 #[compio::test]
 async fn test_follower_restart_does_not_interrupt() -> Result<()> {
-    let config = Arc::new(
-        Config {
-            enable_heartbeat: false,
-            election_timeout_min: 3_000,
-            election_timeout_max: 4_000,
-            ..Default::default()
-        }
-        .validate()?,
-    );
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      election_timeout_min: 3_000,
+      election_timeout_max: 4_000,
+      ..Default::default()
+    }
+    .validate()?,
+  );
 
-    let mut router = RaftRouter::new(config.clone());
-    let _log_index = router.new_cluster(btreeset! {0,1,2}, btreeset! {}).await?;
+  let mut router = RaftRouter::new(config.clone());
+  let _log_index = router.new_cluster(btreeset! {0,1,2}, btreeset! {}).await?;
 
-    let m = router.get_metrics(&0)?;
-    let term = m.current_term;
+  let m = router.get_metrics(&0)?;
+  let term = m.current_term;
 
-    let (n2, sto2, sm2) = router.remove_node(2).unwrap();
-    n2.shutdown().await?;
+  let (n2, sto2, sm2) = router.remove_node(2).unwrap();
+  n2.shutdown().await?;
 
-    let (n1, sto1, sm1) = router.remove_node(1).unwrap();
-    n1.shutdown().await?;
+  let (n1, sto1, sm1) = router.remove_node(1).unwrap();
+  n1.shutdown().await?;
 
-    let (n0, _sto0, _sm0) = router.remove_node(0).unwrap();
-    n0.shutdown().await?;
+  let (n0, _sto0, _sm0) = router.remove_node(0).unwrap();
+  n0.shutdown().await?;
 
-    router.new_raft_node_with_sto(1, sto1, sm1).await;
-    router.new_raft_node_with_sto(2, sto2, sm2).await;
-    let res = router
-        .wait(&1, Some(Duration::from_millis(1_000)))
-        .metrics(|x| x.current_term > term, "node increase term")
-        .await;
+  router.new_raft_node_with_sto(1, sto1, sm1).await;
+  router.new_raft_node_with_sto(2, sto2, sm2).await;
+  let res = router
+    .wait(&1, Some(Duration::from_millis(1_000)))
+    .metrics(|x| x.current_term > term, "node increase term")
+    .await;
 
-    assert!(res.is_err(), "term should not increase immediately");
+  assert!(res.is_err(), "term should not increase immediately");
 
-    router
-        .wait(&1, Some(Duration::from_millis(9_000)))
-        .metrics(
-            |x| x.current_term > term,
-            "node increases term after full election timeout",
-        )
-        .await?;
+  router
+    .wait(&1, Some(Duration::from_millis(9_000)))
+    .metrics(
+      |x| x.current_term > term,
+      "node increases term after full election timeout",
+    )
+    .await?;
 
-    Ok(())
+  Ok(())
 }
 
 /// 丢失全部状态的 Leader 重启后不会重新当选 Leader
 #[compio::test]
 async fn test_leader_restart_clears_state() -> Result<()> {
-    let config = Arc::new(
-        Config {
-            enable_heartbeat: false,
-            enable_elect: false,
-            ..Default::default()
-        }
-        .validate()?,
-    );
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_elect: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
 
-    let mut router = RaftRouter::new(config.clone());
-    router.enable_saving_committed = false;
+  let mut router = RaftRouter::new(config.clone());
+  router.enable_saving_committed = false;
 
-    router.new_raft_node(0).await;
-    router.new_raft_node(1).await;
-    router.new_raft_node(2).await;
+  router.new_raft_node(0).await;
+  router.new_raft_node(1).await;
+  router.new_raft_node(2).await;
 
-    let n0 = router.get_raft_handle(&0)?;
-    n0.initialize(btreemap! {0 => (), 1=>(), 2=>()}).await?;
-    let mut log_index = 1;
+  let n0 = router.get_raft_handle(&0)?;
+  n0.initialize(btreemap! {0 => (), 1=>(), 2=>()}).await?;
+  let mut log_index = 1;
 
-    n0.wait(timeout())
-        .state(ServerState::Leader, "node-0 should become leader")
-        .await?;
-    n0.wait(timeout())
-        .applied_index(Some(log_index), "node-0 applied log")
-        .await?;
+  n0.wait(timeout())
+    .state(ServerState::Leader, "node-0 should become leader")
+    .await?;
+  n0.wait(timeout())
+    .applied_index(Some(log_index), "node-0 applied log")
+    .await?;
 
-    log_index += router.client_request_many(0, "foo", 1).await?;
-    router
-        .wait(&1, timeout())
-        .applied_index(Some(log_index), "node-1 applied log")
-        .await?;
-    router
-        .wait(&2, timeout())
-        .applied_index(Some(log_index), "node-2 applied log")
-        .await?;
+  log_index += router.client_request_many(0, "foo", 1).await?;
+  router
+    .wait(&1, timeout())
+    .applied_index(Some(log_index), "node-1 applied log")
+    .await?;
+  router
+    .wait(&2, timeout())
+    .applied_index(Some(log_index), "node-2 applied log")
+    .await?;
 
-    let (node, _log, _sm): (MemRaft, MemLogStore, MemStateMachine) = router.remove_node(0).unwrap();
-    node.shutdown().await?;
+  let (node, _log, _sm): (MemRaft, MemLogStore, MemStateMachine) = router.remove_node(0).unwrap();
+  node.shutdown().await?;
 
-    router.new_raft_node(0).await;
-    let n0 = router.get_raft_handle(&0)?;
+  router.new_raft_node(0).await;
+  let n0 = router.get_raft_handle(&0)?;
 
-    n0.initialize(btreemap! {0 => (), 1=>(), 2=>()}).await?;
-    n0.trigger().elect(false).await?;
+  n0.initialize(btreemap! {0 => (), 1=>(), 2=>()}).await?;
+  n0.trigger().elect(false).await?;
 
-    let res = n0
-        .wait(timeout())
-        .state(ServerState::Leader, "should not become leader upon restart")
-        .await;
-    assert!(res.is_err());
+  let res = n0
+    .wait(timeout())
+    .state(ServerState::Leader, "should not become leader upon restart")
+    .await;
+  assert!(res.is_err());
 
-    Ok(())
+  Ok(())
 }
 
 /// 单 Follower 重启后由于自身即为 Quorum 能迅速恢复为 Leader
 #[compio::test]
 async fn test_single_follower_restart() -> Result<()> {
-    let config = Arc::new(
-        Config {
-            enable_heartbeat: false,
-            election_timeout_min: 3_000,
-            election_timeout_max: 4_000,
-            ..Default::default()
-        }
-        .validate()?,
-    );
-
-    let mut router = RaftRouter::new(config.clone());
-    let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
-
-    router.client_request_many(0, "foo", 1).await?;
-    log_index += 1;
-
-    let (node, mut sto, sm) = router.remove_node(0).unwrap();
-    node.shutdown().await?;
-    let v = sto.read_vote().await?;
-
-    if let Some(v) = v {
-        sto.save_vote(&Vote::new(v.leader_id().term + 1, v.leader_id().node_id))
-            .await?;
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      election_timeout_min: 3_000,
+      election_timeout_max: 4_000,
+      ..Default::default()
     }
+    .validate()?,
+  );
 
-    router.new_raft_node_with_sto(0, sto, sm).await;
-    router
-        .wait(&0, Some(Duration::from_millis(1_000)))
-        .state(
-            ServerState::Leader,
-            "single node restarted and became leader quickly",
-        )
-        .await?;
+  let mut router = RaftRouter::new(config.clone());
+  let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
 
-    log_index += 1;
+  router.client_request_many(0, "foo", 1).await?;
+  log_index += 1;
 
-    router.client_request_many(0, "foo", 1).await?;
-    log_index += 1;
+  let (node, mut sto, sm) = router.remove_node(0).unwrap();
+  node.shutdown().await?;
+  let v = sto.read_vote().await?;
 
-    router
-        .wait(&0, timeout())
-        .applied_index(Some(log_index), "node-0 works")
-        .await?;
+  if let Some(v) = v {
+    sto
+      .save_vote(&Vote::new(v.leader_id().term + 1, v.leader_id().node_id))
+      .await?;
+  }
 
-    Ok(())
+  router.new_raft_node_with_sto(0, sto, sm).await;
+  router
+    .wait(&0, Some(Duration::from_millis(1_000)))
+    .state(
+      ServerState::Leader,
+      "single node restarted and became leader quickly",
+    )
+    .await?;
+
+  log_index += 1;
+
+  router.client_request_many(0, "foo", 1).await?;
+  log_index += 1;
+
+  router
+    .wait(&0, timeout())
+    .applied_index(Some(log_index), "node-0 works")
+    .await?;
+
+  Ok(())
 }
 
 /// 单 Leader 重启后会重新应用全部日志（自身构成 Quorum）
 #[compio::test]
 async fn test_single_leader_restart_re_apply_logs() -> Result<()> {
-    let config = Arc::new(
-        Config {
-            enable_heartbeat: false,
-            ..Default::default()
-        }
-        .validate()?,
-    );
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
 
-    let mut router = RaftRouter::new(config.clone());
-    router.enable_saving_committed = false;
+  let mut router = RaftRouter::new(config.clone());
+  router.enable_saving_committed = false;
 
-    let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
+  let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
 
-    log_index += router.client_request_many(0, "foo", 1).await?;
+  log_index += router.client_request_many(0, "foo", 1).await?;
 
-    let (node, ls, sm): (MemRaft, MemLogStore, MemStateMachine) = router.remove_node(0).unwrap();
-    node.shutdown().await?;
+  let (node, ls, sm): (MemRaft, MemLogStore, MemStateMachine) = router.remove_node(0).unwrap();
+  node.shutdown().await?;
 
-    sm.clear_state_machine().await;
+  sm.clear_state_machine().await;
 
-    router.new_raft_node_with_sto(0, ls, sm).await;
-    router
-        .wait(&0, timeout())
-        .state(ServerState::Leader, "become leader upon restart")
-        .await?;
+  router.new_raft_node_with_sto(0, ls, sm).await;
+  router
+    .wait(&0, timeout())
+    .state(ServerState::Leader, "become leader upon restart")
+    .await?;
 
-    router
-        .wait(&0, timeout())
-        .applied_index(Some(log_index), "node-0 works")
-        .await?;
+  router
+    .wait(&0, timeout())
+    .applied_index(Some(log_index), "node-0 works")
+    .await?;
 
-    Ok(())
+  Ok(())
 }
 
 /// `wait_for_recovery` 在集群 Commit 重新确立且状态机追赶后返回
 #[compio::test]
 async fn test_wait_for_recovery_recovers_state_machine() -> Result<()> {
-    let config = Arc::new(
-        Config {
-            enable_heartbeat: true,
-            enable_elect: false,
-            ..Default::default()
-        }
-        .validate()?,
-    );
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: true,
+      enable_elect: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
 
-    let mut router = RaftRouter::new(config.clone());
-    router.enable_saving_committed = false;
+  let mut router = RaftRouter::new(config.clone());
+  router.enable_saving_committed = false;
 
-    let log_index = router.new_cluster(btreeset! {0,1,2}, btreeset! {}).await?;
+  let log_index = router.new_cluster(btreeset! {0,1,2}, btreeset! {}).await?;
 
-    let (node, ls, sm): (MemRaft, MemLogStore, MemStateMachine) = router.remove_node(1).unwrap();
-    node.shutdown().await?;
+  let (node, ls, sm): (MemRaft, MemLogStore, MemStateMachine) = router.remove_node(1).unwrap();
+  node.shutdown().await?;
 
-    sm.clear_state_machine().await;
+  sm.clear_state_machine().await;
 
-    router.new_raft_node_with_sto(1, ls, sm).await;
+  router.new_raft_node_with_sto(1, ls, sm).await;
 
-    let m = router
-        .get_raft_handle(&1)?
-        .wait_for_recovery(timeout())
-        .await?;
+  let m = router
+    .get_raft_handle(&1)?
+    .wait_for_recovery(timeout())
+    .await?;
 
-    assert!(m.cluster_committed.is_some(), "cluster commit is perceived");
-    assert!(
-        m.last_applied.as_ref().map(|x| x.index()) >= Some(log_index),
-        "state machine recovered: last_applied {:?} >= {}",
-        m.last_applied,
-        log_index
-    );
+  assert!(m.cluster_committed.is_some(), "cluster commit is perceived");
+  assert!(
+    m.last_applied.as_ref().map(|x| x.index()) >= Some(log_index),
+    "state machine recovered: last_applied {:?} >= {}",
+    m.last_applied,
+    log_index
+  );
 
-    Ok(())
+  Ok(())
 }
 
 /// 当无法重新确立集群 Commit 时 `wait_for_recovery` 超时
 #[compio::test]
 async fn test_wait_for_recovery_times_out_without_quorum() -> Result<()> {
-    let config = Arc::new(
-        Config {
-            enable_heartbeat: false,
-            enable_elect: false,
-            ..Default::default()
-        }
-        .validate()?,
-    );
-
-    let mut router = RaftRouter::new(config.clone());
-
-    let _log_index = router.new_cluster(btreeset! {0,1,2}, btreeset! {}).await?;
-
-    for id in [1, 2] {
-        let (node, _ls, _sm): (MemRaft, MemLogStore, MemStateMachine) =
-            router.remove_node(id).unwrap();
-        node.shutdown().await?;
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_elect: false,
+      ..Default::default()
     }
+    .validate()?,
+  );
 
-    let (node, ls, sm): (MemRaft, MemLogStore, MemStateMachine) = router.remove_node(0).unwrap();
+  let mut router = RaftRouter::new(config.clone());
+
+  let _log_index = router.new_cluster(btreeset! {0,1,2}, btreeset! {}).await?;
+
+  for id in [1, 2] {
+    let (node, _ls, _sm): (MemRaft, MemLogStore, MemStateMachine) = router.remove_node(id).unwrap();
     node.shutdown().await?;
+  }
 
-    router.new_raft_node_with_sto(0, ls, sm).await;
-    router
-        .wait(&0, timeout())
-        .state(ServerState::Leader, "restore leadership without election")
-        .await?;
+  let (node, ls, sm): (MemRaft, MemLogStore, MemStateMachine) = router.remove_node(0).unwrap();
+  node.shutdown().await?;
 
-    let res = router
-        .get_raft_handle(&0)?
-        .wait_for_recovery(Some(Duration::from_millis(500)))
-        .await;
-    assert!(
-        matches!(res, Err(WaitError::Timeout(..))),
-        "expected timeout without quorum, got {:?}",
-        res
-    );
+  router.new_raft_node_with_sto(0, ls, sm).await;
+  router
+    .wait(&0, timeout())
+    .state(ServerState::Leader, "restore leadership without election")
+    .await?;
 
-    Ok(())
+  let res = router
+    .get_raft_handle(&0)?
+    .wait_for_recovery(Some(Duration::from_millis(500)))
+    .await;
+  assert!(
+    matches!(res, Err(WaitError::Timeout(..))),
+    "expected timeout without quorum, got {:?}",
+    res
+  );
+
+  Ok(())
 }
 
 /// 重启且未重新选举的 Leader 不恢复 cluster_committed
 #[compio::test]
 async fn test_leader_restart_cluster_committed_not_restored() -> Result<()> {
-    use fixtures::rpc_request::RpcRequest;
-    use std::sync::atomic::AtomicU64;
-    use std::sync::atomic::Ordering;
-    use zenoh_raft::RPCTypes;
-    use zenoh_raft::testing::memstore::TypeConfig;
-    use zenoh_raft::type_config::TypeConfigExt;
+  use std::sync::atomic::{AtomicU64, Ordering};
 
-    let config = Arc::new(
-        Config {
-            enable_heartbeat: false,
-            enable_elect: false,
-            ..Default::default()
-        }
-        .validate()?,
+  use fixtures::rpc_request::RpcRequest;
+  use zenoh_raft::{RPCTypes, testing::memstore::TypeConfig, type_config::TypeConfigExt};
+
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_elect: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
+
+  let mut router = RaftRouter::new(config.clone());
+  let log_index = router.new_cluster(btreeset! {0,1,2}, btreeset! {}).await?;
+
+  {
+    let m = router.get_metrics(&0)?;
+    assert_eq!(
+      Some(log_index),
+      m.cluster_committed.as_ref().map(|x| x.index()),
+      "cluster_committed established by quorum replication"
     );
+    assert_eq!(
+      Some(log_index),
+      m.local_committed.as_ref().map(|x| x.index())
+    );
+  }
 
-    let mut router = RaftRouter::new(config.clone());
-    let log_index = router.new_cluster(btreeset! {0,1,2}, btreeset! {}).await?;
+  for id in [1, 2] {
+    let (node, _ls, _sm): (MemRaft, MemLogStore, MemStateMachine) = router.remove_node(id).unwrap();
+    node.shutdown().await?;
+  }
 
+  {
+    let (node, ls, sm): (MemRaft, MemLogStore, MemStateMachine) = router.remove_node(0).unwrap();
+    node.shutdown().await?;
+
+    router.new_raft_node_with_sto(0, ls, sm).await;
+    router
+      .wait(&0, timeout())
+      .state(ServerState::Leader, "restore leadership without election")
+      .await?;
+    router
+      .wait(&0, timeout())
+      .applied_index(Some(log_index), "applied restored from storage")
+      .await?;
+  }
+
+  {
+    let m = router.get_metrics(&0)?;
+    assert_eq!(
+      Some(log_index),
+      m.local_committed.as_ref().map(|x| x.index()),
+      "local_committed restored from storage"
+    );
+    assert_eq!(
+      None, m.cluster_committed,
+      "cluster_committed must not be restored from storage"
+    );
+  }
+
+  {
+    let total = Arc::new(AtomicU64::new(0));
+    let non_null = Arc::new(AtomicU64::new(0));
     {
-        let m = router.get_metrics(&0)?;
-        assert_eq!(
-            Some(log_index),
-            m.cluster_committed.as_ref().map(|x| x.index()),
-            "cluster_committed established by quorum replication"
-        );
-        assert_eq!(
-            Some(log_index),
-            m.local_committed.as_ref().map(|x| x.index())
-        );
-    }
-
-    for id in [1, 2] {
-        let (node, _ls, _sm): (MemRaft, MemLogStore, MemStateMachine) =
-            router.remove_node(id).unwrap();
-        node.shutdown().await?;
-    }
-
-    {
-        let (node, ls, sm): (MemRaft, MemLogStore, MemStateMachine) =
-            router.remove_node(0).unwrap();
-        node.shutdown().await?;
-
-        router.new_raft_node_with_sto(0, ls, sm).await;
-        router
-            .wait(&0, timeout())
-            .state(ServerState::Leader, "restore leadership without election")
-            .await?;
-        router
-            .wait(&0, timeout())
-            .applied_index(Some(log_index), "applied restored from storage")
-            .await?;
-    }
-
-    {
-        let m = router.get_metrics(&0)?;
-        assert_eq!(
-            Some(log_index),
-            m.local_committed.as_ref().map(|x| x.index()),
-            "local_committed restored from storage"
-        );
-        assert_eq!(
-            None, m.cluster_committed,
-            "cluster_committed must not be restored from storage"
-        );
-    }
-
-    {
-        let total = Arc::new(AtomicU64::new(0));
-        let non_null = Arc::new(AtomicU64::new(0));
-        {
-            let total = total.clone();
-            let non_null = non_null.clone();
-            use futures_util::future::ready;
-            router
-                .set_rpc_pre_hook(
-                    RPCTypes::AppendEntries,
-                    move |_router, req, from_id, _target| {
-                        if from_id == 0
-                            && let RpcRequest::AppendEntries(ae) = &req
-                        {
-                            total.fetch_add(1, Ordering::Relaxed);
-                            if ae.leader_commit.is_some() {
-                                non_null.fetch_add(1, Ordering::Relaxed);
-                            }
-                        }
-                        Box::pin(ready(Ok(())))
-                    },
-                )
-                .await;
-        }
-
-        router.get_raft_handle(&0)?.trigger().heartbeat().await?;
-
-        let mut sent = 0;
-        for _ in 0..100 {
-            sent = total.load(Ordering::Relaxed);
-            if sent > 0 {
-                break;
+      let total = total.clone();
+      let non_null = non_null.clone();
+      use futures_util::future::ready;
+      router
+        .set_rpc_pre_hook(
+          RPCTypes::AppendEntries,
+          move |_router, req, from_id, _target| {
+            if from_id == 0
+              && let RpcRequest::AppendEntries(ae) = &req
+            {
+              total.fetch_add(1, Ordering::Relaxed);
+              if ae.leader_commit.is_some() {
+                non_null.fetch_add(1, Ordering::Relaxed);
+              }
             }
-            TypeConfig::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(
-            sent > 0,
-            "the restored leader must broadcast at least one heartbeat"
-        );
-        assert_eq!(
-            0,
-            non_null.load(Ordering::Relaxed),
-            "a restored leader's heartbeat must broadcast a null leader_commit"
-        );
+            Box::pin(ready(Ok(())))
+          },
+        )
+        .await;
     }
 
-    Ok(())
+    router.get_raft_handle(&0)?.trigger().heartbeat().await?;
+
+    let mut sent = 0;
+    for _ in 0..100 {
+      sent = total.load(Ordering::Relaxed);
+      if sent > 0 {
+        break;
+      }
+      TypeConfig::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+      sent > 0,
+      "the restored leader must broadcast at least one heartbeat"
+    );
+    assert_eq!(
+      0,
+      non_null.load(Ordering::Relaxed),
+      "a restored leader's heartbeat must broadcast a null leader_commit"
+    );
+  }
+
+  Ok(())
 }
 
 /// 当 enable_leader_restore=false 时重启 Leader 重新进行选举
 #[compio::test]
 async fn test_leader_restart_leader_restore_disabled() -> Result<()> {
-    let config = Arc::new(
-        Config {
-            enable_heartbeat: false,
-            enable_leader_restore: Some(false),
-            ..Default::default()
-        }
-        .validate()?,
-    );
-
-    let mut router = RaftRouter::new(config.clone());
-    let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
-
-    log_index += router.client_request_many(0, "foo", 1).await?;
-
-    {
-        let (node, ls, sm): (MemRaft, MemLogStore, MemStateMachine) =
-            router.remove_node(0).unwrap();
-        node.shutdown().await?;
-
-        router.new_raft_node_with_sto(0, ls, sm).await;
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      enable_leader_restore: Some(false),
+      ..Default::default()
     }
+    .validate()?,
+  );
 
-    {
-        router
-            .wait(&0, timeout())
-            .state(ServerState::Leader, "leader again via election")
-            .await?;
-        router
-            .wait(&0, timeout())
-            .vote(Vote::new_committed(2, 0), "vote moved to term 2")
-            .await?;
+  let mut router = RaftRouter::new(config.clone());
+  let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
 
-        log_index += 1;
-        router
-            .wait(&0, timeout())
-            .applied_index(Some(log_index), "logs re-applied, plus the noop")
-            .await?;
-    }
+  log_index += router.client_request_many(0, "foo", 1).await?;
 
-    Ok(())
+  {
+    let (node, ls, sm): (MemRaft, MemLogStore, MemStateMachine) = router.remove_node(0).unwrap();
+    node.shutdown().await?;
+
+    router.new_raft_node_with_sto(0, ls, sm).await;
+  }
+
+  {
+    router
+      .wait(&0, timeout())
+      .state(ServerState::Leader, "leader again via election")
+      .await?;
+    router
+      .wait(&0, timeout())
+      .vote(Vote::new_committed(2, 0), "vote moved to term 2")
+      .await?;
+
+    log_index += 1;
+    router
+      .wait(&0, timeout())
+      .applied_index(Some(log_index), "logs re-applied, plus the noop")
+      .await?;
+  }
+
+  Ok(())
 }
 
 /// 临时（内存）状态机重启结合持久快照恢复测试 (Issue 881)
 #[compio::test]
 async fn test_issue_881_transient_state_machine() -> Result<()> {
-    let config = Arc::new(
-        Config {
-            enable_heartbeat: false,
-            ..Default::default()
-        }
-        .validate()?,
-    );
-
-    let mut router = RaftRouter::new(config.clone());
-    router.enable_saving_committed = true;
-
-    let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
-
-    log_index += router.client_request_many(0, "foo", 10).await?;
-    router
-        .wait(&0, timeout())
-        .applied_index(Some(log_index), "node-0 applied")
-        .await?;
-
-    let snapshot_log_index = log_index;
-
-    {
-        let n = router.get_raft_handle(&0)?;
-        n.trigger().snapshot().await?;
-        router
-            .wait(&0, timeout())
-            .snapshot(log_id(1, 0, snapshot_log_index), "snapshot created")
-            .await?;
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      ..Default::default()
     }
+    .validate()?,
+  );
 
-    log_index += router.client_request_many(0, "bar", 5).await?;
+  let mut router = RaftRouter::new(config.clone());
+  router.enable_saving_committed = true;
+
+  let mut log_index = router.new_cluster(btreeset! {0}, btreeset! {}).await?;
+
+  log_index += router.client_request_many(0, "foo", 10).await?;
+  router
+    .wait(&0, timeout())
+    .applied_index(Some(log_index), "node-0 applied")
+    .await?;
+
+  let snapshot_log_index = log_index;
+
+  {
+    let n = router.get_raft_handle(&0)?;
+    n.trigger().snapshot().await?;
     router
-        .wait(&0, timeout())
-        .applied_index(Some(log_index), "node-0 applied new logs")
-        .await?;
+      .wait(&0, timeout())
+      .snapshot(log_id(1, 0, snapshot_log_index), "snapshot created")
+      .await?;
+  }
 
-    {
-        let (node, ls, sm): (MemRaft, MemLogStore, MemStateMachine) =
-            router.remove_node(0).unwrap();
-        node.shutdown().await?;
+  log_index += router.client_request_many(0, "bar", 5).await?;
+  router
+    .wait(&0, timeout())
+    .applied_index(Some(log_index), "node-0 applied new logs")
+    .await?;
 
-        sm.clear_state_machine().await;
-        router.new_raft_node_with_sto(0, ls, sm).await;
-    }
+  {
+    let (node, ls, sm): (MemRaft, MemLogStore, MemStateMachine) = router.remove_node(0).unwrap();
+    node.shutdown().await?;
 
-    router
-        .wait(&0, timeout())
-        .applied_index(Some(log_index), "node-0 recovered by snapshot + log replay")
-        .await?;
+    sm.clear_state_machine().await;
+    router.new_raft_node_with_sto(0, ls, sm).await;
+  }
 
-    Ok(())
+  router
+    .wait(&0, timeout())
+    .applied_index(Some(log_index), "node-0 recovered by snapshot + log replay")
+    .await?;
+
+  Ok(())
 }
 
 /// 非成员 Leader 重启时以 Learner 状态启动 (Issue 920)
 #[compio::test]
 async fn test_issue_920_non_member_leader_restart() -> Result<()> {
-    let config = Arc::new(
-        Config {
-            enable_heartbeat: false,
-            ..Default::default()
-        }
-        .validate()?,
-    );
+  let config = Arc::new(
+    Config {
+      enable_heartbeat: false,
+      ..Default::default()
+    }
+    .validate()?,
+  );
 
-    let mut router = RaftRouter::new(config.clone());
+  let mut router = RaftRouter::new(config.clone());
 
-    let (mut log_store, sm) = router.new_store();
-    log_store.save_vote(&Vote::new_committed(1, 0)).await?;
-    router.new_raft_node_with_sto(0, log_store, sm).await;
+  let (mut log_store, sm) = router.new_store();
+  log_store.save_vote(&Vote::new_committed(1, 0)).await?;
+  router.new_raft_node_with_sto(0, log_store, sm).await;
 
-    router
-        .wait(&0, timeout())
-        .state(ServerState::Learner, "node 0 becomes learner when startup")
-        .await?;
+  router
+    .wait(&0, timeout())
+    .state(ServerState::Learner, "node 0 becomes learner when startup")
+    .await?;
 
-    Ok(())
+  Ok(())
 }

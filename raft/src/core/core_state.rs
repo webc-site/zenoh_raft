@@ -1,7 +1,6 @@
-use crate::RaftTypeConfig;
 #[cfg(doc)]
 use crate::core::RaftCore;
-use crate::type_config::alias::LogIdOf;
+use crate::{RaftTypeConfig, type_config::alias::LogIdOf};
 
 /// State for [`RaftCore`] that does not directly affect consensus.
 ///
@@ -10,10 +9,10 @@ use crate::type_config::alias::LogIdOf;
 #[derive(Debug, Default, Clone)]
 pub(crate) struct CoreState<C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    /// LogId of the last snapshot attempt.
-    ///
-    /// Prevents repeated attempts when the state machine declines to build a snapshot.
-    pub(crate) snapshot_tried_at: Option<LogIdOf<C>>,
+  /// LogId of the last snapshot attempt.
+  ///
+  /// Prevents repeated attempts when the state machine declines to build a snapshot.
+  pub(crate) snapshot_tried_at: Option<LogIdOf<C>>,
 }

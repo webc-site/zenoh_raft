@@ -4,14 +4,14 @@
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("Replication is closed: {reason}")]
 pub struct ReplicationClosed {
-    reason: String,
+  reason: String,
 }
 
 impl ReplicationClosed {
-    /// Create a new ReplicationClosed error with the given reason.
-    pub fn new(reason: impl ToString) -> Self {
-        Self {
-            reason: reason.to_string(),
-        }
+  /// Create a new ReplicationClosed error with the given reason.
+  pub fn new(reason: impl ToString) -> Self {
+    Self {
+      reason: reason.to_string(),
     }
+  }
 }

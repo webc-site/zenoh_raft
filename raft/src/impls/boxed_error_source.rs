@@ -1,7 +1,6 @@
 //! A boxed error wrapper for smaller error type sizes.
 
-use std::error::Error;
-use std::fmt;
+use std::{error::Error, fmt};
 
 use anyerror::AnyError;
 
@@ -17,43 +16,43 @@ use crate::errors::ErrorSource;
 /// larger error types.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoxedErrorSource {
-    inner: Box<AnyError>,
+  inner: Box<AnyError>,
 }
 
 impl fmt::Display for BoxedErrorSource {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.inner.fmt(f)
-    }
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    self.inner.fmt(f)
+  }
 }
 
 impl Error for BoxedErrorSource {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        self.inner.source()
-    }
+  fn source(&self) -> Option<&(dyn Error + 'static)> {
+    self.inner.source()
+  }
 }
 
 impl ErrorSource for BoxedErrorSource {
-    fn from_error<E: Error + 'static>(error: &E) -> Self {
-        Self {
-            inner: Box::new(AnyError::new(error)),
-        }
+  fn from_error<E: Error + 'static>(error: &E) -> Self {
+    Self {
+      inner: Box::new(AnyError::new(error)),
     }
+  }
 
-    fn from_string(msg: impl ToString) -> Self {
-        Self {
-            inner: Box::new(AnyError::error(msg)),
-        }
+  fn from_string(msg: impl ToString) -> Self {
+    Self {
+      inner: Box::new(AnyError::error(msg)),
     }
+  }
 
-    fn has_backtrace(&self) -> bool {
-        anyerror::backtrace_str().is_some()
-    }
+  fn has_backtrace(&self) -> bool {
+    anyerror::backtrace_str().is_some()
+  }
 
-    fn fmt_backtrace(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(bt) = anyerror::backtrace_str() {
-            write!(f, "{}", bt)
-        } else {
-            Ok(())
-        }
+  fn fmt_backtrace(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    if let Some(bt) = anyerror::backtrace_str() {
+      write!(f, "{}", bt)
+    } else {
+      Ok(())
     }
+  }
 }

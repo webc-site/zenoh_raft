@@ -2,9 +2,7 @@ use std::fmt;
 
 use display_more::DisplayOptionExt;
 
-use crate::RaftTypeConfig;
-use crate::Vote;
-use crate::type_config::alias::LogIdOf;
+use crate::{RaftTypeConfig, Vote, type_config::alias::LogIdOf};
 
 /// State of the most recently flushed log I/O operation.
 ///
@@ -28,35 +26,35 @@ use crate::type_config::alias::LogIdOf;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd)]
 pub struct FlushPoint<C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    /// The vote(leader) under which this I/O operation was submitted.
-    pub vote: Vote<C::LeaderId>,
+  /// The vote(leader) under which this I/O operation was submitted.
+  pub vote: Vote<C::LeaderId>,
 
-    /// The last log entry that was flushed, or `None` if only a vote was saved without appending
-    /// logs.
-    pub last_log_id: Option<LogIdOf<C>>,
+  /// The last log entry that was flushed, or `None` if only a vote was saved without appending
+  /// logs.
+  pub last_log_id: Option<LogIdOf<C>>,
 }
 
 impl<C> fmt::Display for FlushPoint<C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "FlushPoint({}, {})",
-            self.vote,
-            self.last_log_id.display(),
-        )
-    }
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(
+      f,
+      "FlushPoint({}, {})",
+      self.vote,
+      self.last_log_id.display(),
+    )
+  }
 }
 
 impl<C> FlushPoint<C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    pub fn new(vote: Vote<C::LeaderId>, last_log_id: Option<LogIdOf<C>>) -> Self {
-        Self { vote, last_log_id }
-    }
+  pub fn new(vote: Vote<C::LeaderId>, last_log_id: Option<LogIdOf<C>>) -> Self {
+    Self { vote, last_log_id }
+  }
 }

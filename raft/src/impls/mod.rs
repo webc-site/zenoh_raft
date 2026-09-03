@@ -26,22 +26,20 @@ mod boxed_error_source;
 
 pub use boxed_error_source::BoxedErrorSource;
 
-pub use crate::entry::Entry;
-pub use crate::entry::EntryPayload;
-pub use crate::node::BasicNode;
-pub use crate::node::EmptyNode;
-pub use crate::node::NodeInfo;
-pub use crate::raft::responder::impls::OneshotResponder;
-pub use crate::raft::responder::impls::ProgressResponder;
+pub use crate::{
+  entry::{Entry, EntryPayload},
+  node::{BasicNode, EmptyNode, NodeInfo},
+  raft::responder::impls::{OneshotResponder, ProgressResponder},
+};
 
 /// LeaderId implementation for advanced mode, allowing multiple leaders per term.
 pub mod leader_id_adv {
-    pub use crate::vote::leader_id::leader_id_adv::LeaderId;
+  pub use crate::vote::leader_id::leader_id_adv::LeaderId;
 }
 
 /// LeaderId implementation for standard Raft mode, enforcing single leader per term.
 pub mod leader_id_std {
-    pub use crate::vote::leader_id::leader_id_std::LeaderId;
+  pub use crate::vote::leader_id::leader_id_std::LeaderId;
 }
 
 /// Default [`Batch`](`crate::batch::Batch`) implementation backed by `SmallVec<[T; 1]>`,

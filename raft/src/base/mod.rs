@@ -30,15 +30,10 @@
 pub(crate) mod finalized;
 pub(crate) mod shared_id_generator;
 
-pub use crate::async_runtime::BoxAny;
-pub use crate::async_runtime::BoxAsyncOnceMut;
-pub use crate::async_runtime::BoxFuture;
-pub use crate::async_runtime::BoxIterator;
-pub use crate::async_runtime::BoxMaybeAsyncOnceMut;
-pub use crate::async_runtime::BoxOnce;
-pub use crate::async_runtime::BoxStream;
-pub use crate::async_runtime::OptionalSend;
-pub use crate::async_runtime::OptionalSync;
+pub use crate::async_runtime::{
+  BoxAny, BoxAsyncOnceMut, BoxFuture, BoxIterator, BoxMaybeAsyncOnceMut, BoxOnce, BoxStream,
+  OptionalSend, OptionalSync,
+};
 
 /// A trait that combines foundational traits.
 pub trait OptionalFeatures: OptionalSend + OptionalSync + Unpin {}

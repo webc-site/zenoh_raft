@@ -1,283 +1,286 @@
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use maplit::btreeset;
 use pretty_assertions::assert_eq;
 
-use crate::Membership;
-use crate::ServerState;
-use crate::Vote;
-use crate::batch::Batch;
-use crate::engine::Command;
-use crate::engine::Engine;
-use crate::engine::LogIdList;
-use crate::engine::TargetProgress;
-use crate::engine::testing::UTConfig;
-use crate::engine::testing::log_id;
-use crate::entry::RaftEntry;
-use crate::log_id_range::LogIdRange;
-use crate::progress::entry::ProgressEntry;
-use crate::progress::inflight_id::InflightId;
-use crate::progress::stream_id::StreamId;
-use crate::raft_state::IOId;
-use crate::replication::replicate::Replicate;
-use crate::type_config::TypeConfigExt;
-use crate::type_config::alias::EntryOf;
-use crate::type_config::alias::StoredMembershipOf;
-use crate::utime::Leased;
-use crate::vote::raft_vote::RaftVoteExt;
+use crate::{
+  Membership, ServerState, Vote,
+  batch::Batch,
+  engine::{
+    Command, Engine, LogIdList, TargetProgress,
+    testing::{UTConfig, log_id},
+  },
+  entry::RaftEntry,
+  log_id_range::LogIdRange,
+  progress::{entry::ProgressEntry, inflight_id::InflightId, stream_id::StreamId},
+  raft_state::IOId,
+  replication::replicate::Replicate,
+  type_config::{
+    TypeConfigExt,
+    alias::{EntryOf, StoredMembershipOf},
+  },
+  utime::Leased,
+  vote::raft_vote::RaftVoteExt,
+};
 
 fn m_empty() -> Membership<u64, ()> {
-    Membership::<u64, ()>::new_with_defaults(vec![btreeset! {}], [])
+  Membership::<u64, ()>::new_with_defaults(vec![btreeset! {}], [])
 }
 
 fn m23() -> Membership<u64, ()> {
-    Membership::<u64, ()>::new_with_defaults(vec![btreeset! {2,3}], [])
+  Membership::<u64, ()>::new_with_defaults(vec![btreeset! {2,3}], [])
 }
 
 fn m34() -> Membership<u64, ()> {
-    Membership::<u64, ()>::new_with_defaults(vec![btreeset! {3,4}], [])
+  Membership::<u64, ()>::new_with_defaults(vec![btreeset! {3,4}], [])
 }
 
 fn eng() -> Engine<UTConfig> {
-    let mut eng = Engine::testing_default(0);
-    eng.state.enable_validation(false);
-    eng.config.id = 2;
-    // This will be overridden
-    eng.state.server_state = ServerState::default();
-    eng
+  let mut eng = Engine::testing_default(0);
+  eng.state.enable_validation(false);
+  eng.config.id = 2;
+  // This will be overridden
+  eng.state.server_state = ServerState::default();
+  eng
 }
 
 /// It is a Leader but not yet append any logs.
 #[test]
 fn test_startup_as_leader_without_logs() -> anyhow::Result<()> {
-    let mut eng = eng();
-    // self.id==2 is a voter:
-    eng.state
-        .membership_state
-        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-            Some(log_id(1, 1, 3)),
-            m23(),
-        )));
-    eng.state.log_ids = LogIdList::new(None, [log_id(1, 1, 3)]);
-    // Committed vote makes it a leader at startup.
-    eng.state.vote = Leased::new(
-        UTConfig::<()>::now(),
-        Duration::from_millis(500),
-        Vote::new_committed(2, 2),
-    );
+  let mut eng = eng();
+  // self.id==2 is a voter:
+  eng
+    .state
+    .membership_state
+    .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+      Some(log_id(1, 1, 3)),
+      m23(),
+    )));
+  eng.state.log_ids = LogIdList::new(None, [log_id(1, 1, 3)]);
+  // Committed vote makes it a leader at startup.
+  eng.state.vote = Leased::new(
+    UTConfig::<()>::now(),
+    Duration::from_millis(500),
+    Vote::new_committed(2, 2),
+  );
 
-    eng.startup();
+  eng.startup();
 
-    assert_eq!(ServerState::Leader, eng.state.server_state);
-    let leader = eng.leader_ref().unwrap();
-    assert_eq!(leader.noop_log_id(), &log_id(2, 2, 4));
-    assert_eq!(leader.last_log_id(), Some(&log_id(2, 2, 4)));
-    assert_eq!(
-        vec![
-            Command::UpdateIOProgress {
-                when: None,
-                io_id: IOId::new_log_io(Vote::new(2, 2).to_committed(), Some(log_id(1, 1, 3)))
-            },
-            Command::RebuildReplicationStreams {
-                leader_vote: Vote::new(2, 2).to_committed(),
-                targets: vec![TargetProgress {
-                    target: 3,
-                    target_node: (),
-                    progress: ProgressEntry::empty(3, StreamId::new(2), 4),
-                }],
-                close_old_streams: true,
-            },
-            Command::AppendEntries {
-                committed_vote: Vote::new(2, 2).to_committed(),
-                entries: Batch::of([EntryOf::<UTConfig>::new_blank(log_id(2, 2, 4))]),
-            },
-            Command::Replicate {
-                target: 3,
-                req: Replicate::new_logs(
-                    LogIdRange::new(None, Some(log_id(2, 2, 4))),
-                    InflightId::new(1)
-                ),
-            }
-        ],
-        eng.output.take_commands()
-    );
+  assert_eq!(ServerState::Leader, eng.state.server_state);
+  let leader = eng.leader_ref().unwrap();
+  assert_eq!(leader.noop_log_id(), &log_id(2, 2, 4));
+  assert_eq!(leader.last_log_id(), Some(&log_id(2, 2, 4)));
+  assert_eq!(
+    vec![
+      Command::UpdateIOProgress {
+        when: None,
+        io_id: IOId::new_log_io(Vote::new(2, 2).to_committed(), Some(log_id(1, 1, 3)))
+      },
+      Command::RebuildReplicationStreams {
+        leader_vote: Vote::new(2, 2).to_committed(),
+        targets: vec![TargetProgress {
+          target: 3,
+          target_node: (),
+          progress: ProgressEntry::empty(3, StreamId::new(2), 4),
+        }],
+        close_old_streams: true,
+      },
+      Command::AppendEntries {
+        committed_vote: Vote::new(2, 2).to_committed(),
+        entries: Batch::of([EntryOf::<UTConfig>::new_blank(log_id(2, 2, 4))]),
+      },
+      Command::Replicate {
+        target: 3,
+        req: Replicate::new_logs(
+          LogIdRange::new(None, Some(log_id(2, 2, 4))),
+          InflightId::new(1)
+        ),
+      }
+    ],
+    eng.output.take_commands()
+  );
 
-    Ok(())
+  Ok(())
 }
 
 #[test]
 fn test_startup_as_leader_with_proposed_logs() -> anyhow::Result<()> {
-    log::info!("--- a leader proposed logs and restarted, reuse noop_log_id");
-    let mut eng = eng();
-    // self.id==2 is a voter:
-    eng.state
-        .membership_state
-        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-            Some(log_id(2, 1, 3)),
-            m23(),
-        )));
-    // Last-per-leader format: leader (1,1) last at index 3, leader (1,2) last at index 6
-    eng.state.log_ids = LogIdList::new(None, [log_id(1, 1, 3), log_id(1, 2, 6)]);
-    // Committed vote makes it a leader at startup.
-    eng.state.vote = Leased::new(
-        UTConfig::<()>::now(),
-        Duration::from_millis(500),
-        Vote::new_committed(1, 2),
-    );
+  log::info!("--- a leader proposed logs and restarted, reuse noop_log_id");
+  let mut eng = eng();
+  // self.id==2 is a voter:
+  eng
+    .state
+    .membership_state
+    .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+      Some(log_id(2, 1, 3)),
+      m23(),
+    )));
+  // Last-per-leader format: leader (1,1) last at index 3, leader (1,2) last at index 6
+  eng.state.log_ids = LogIdList::new(None, [log_id(1, 1, 3), log_id(1, 2, 6)]);
+  // Committed vote makes it a leader at startup.
+  eng.state.vote = Leased::new(
+    UTConfig::<()>::now(),
+    Duration::from_millis(500),
+    Vote::new_committed(1, 2),
+  );
 
-    eng.startup();
+  eng.startup();
 
-    assert_eq!(ServerState::Leader, eng.state.server_state);
-    let leader = eng.leader_ref().unwrap();
-    assert_eq!(leader.noop_log_id(), &log_id(1, 2, 4));
-    assert_eq!(leader.last_log_id(), Some(&log_id(1, 2, 6)));
-    assert_eq!(
-        vec![
-            Command::UpdateIOProgress {
-                when: None,
-                io_id: IOId::new_log_io(Vote::new(1, 2).to_committed(), Some(log_id(1, 2, 6)))
-            },
-            Command::RebuildReplicationStreams {
-                leader_vote: Vote::new(1, 2).to_committed(),
-                targets: vec![TargetProgress {
-                    target: 3,
-                    target_node: (),
-                    progress: ProgressEntry::empty(3, StreamId::new(2), 7),
-                }],
-                close_old_streams: true,
-            },
-            Command::Replicate {
-                target: 3,
-                req: Replicate::new_logs(
-                    LogIdRange::new(None, Some(log_id(1, 2, 6))),
-                    InflightId::new(1)
-                )
-            }
-        ],
-        eng.output.take_commands()
-    );
+  assert_eq!(ServerState::Leader, eng.state.server_state);
+  let leader = eng.leader_ref().unwrap();
+  assert_eq!(leader.noop_log_id(), &log_id(1, 2, 4));
+  assert_eq!(leader.last_log_id(), Some(&log_id(1, 2, 6)));
+  assert_eq!(
+    vec![
+      Command::UpdateIOProgress {
+        when: None,
+        io_id: IOId::new_log_io(Vote::new(1, 2).to_committed(), Some(log_id(1, 2, 6)))
+      },
+      Command::RebuildReplicationStreams {
+        leader_vote: Vote::new(1, 2).to_committed(),
+        targets: vec![TargetProgress {
+          target: 3,
+          target_node: (),
+          progress: ProgressEntry::empty(3, StreamId::new(2), 7),
+        }],
+        close_old_streams: true,
+      },
+      Command::Replicate {
+        target: 3,
+        req: Replicate::new_logs(
+          LogIdRange::new(None, Some(log_id(1, 2, 6))),
+          InflightId::new(1)
+        )
+      }
+    ],
+    eng.output.take_commands()
+  );
 
-    Ok(())
+  Ok(())
 }
 
 /// When starting up, a leader that is not a voter should not panic.
 #[test]
 fn test_startup_as_leader_not_voter_issue_920() -> anyhow::Result<()> {
-    let mut eng = eng();
-    // self.id==2 is a voter:
-    eng.state
-        .membership_state
-        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-            Some(log_id(2, 1, 3)),
-            m_empty(),
-        )));
-    // Committed vote makes it a leader at startup.
-    eng.state.vote = Leased::new(
-        UTConfig::<()>::now(),
-        Duration::from_millis(500),
-        Vote::new_committed(1, 2),
-    );
+  let mut eng = eng();
+  // self.id==2 is a voter:
+  eng
+    .state
+    .membership_state
+    .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+      Some(log_id(2, 1, 3)),
+      m_empty(),
+    )));
+  // Committed vote makes it a leader at startup.
+  eng.state.vote = Leased::new(
+    UTConfig::<()>::now(),
+    Duration::from_millis(500),
+    Vote::new_committed(1, 2),
+  );
 
-    eng.startup();
+  eng.startup();
 
-    assert_eq!(ServerState::Learner, eng.state.server_state);
-    assert_eq!(eng.output.take_commands(), vec![]);
+  assert_eq!(ServerState::Learner, eng.state.server_state);
+  assert_eq!(eng.output.take_commands(), vec![]);
 
-    Ok(())
+  Ok(())
 }
 
 #[test]
 fn test_startup_candidate_becomes_follower() -> anyhow::Result<()> {
-    let mut eng = eng();
-    // self.id==2 is a voter:
-    eng.state
-        .membership_state
-        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-            Some(log_id(2, 1, 3)),
-            m23(),
-        )));
-    // Non-committed vote makes it a candidate at startup.
-    eng.state.vote = Leased::new(
-        UTConfig::<()>::now(),
-        Duration::from_millis(500),
-        Vote::new(1, 2),
-    );
+  let mut eng = eng();
+  // self.id==2 is a voter:
+  eng
+    .state
+    .membership_state
+    .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+      Some(log_id(2, 1, 3)),
+      m23(),
+    )));
+  // Non-committed vote makes it a candidate at startup.
+  eng.state.vote = Leased::new(
+    UTConfig::<()>::now(),
+    Duration::from_millis(500),
+    Vote::new(1, 2),
+  );
 
-    eng.startup();
+  eng.startup();
 
-    assert_eq!(ServerState::Follower, eng.state.server_state);
-    assert_eq!(0, eng.output.take_commands().len());
+  assert_eq!(ServerState::Follower, eng.state.server_state);
+  assert_eq!(0, eng.output.take_commands().len());
 
-    Ok(())
+  Ok(())
 }
 #[test]
 fn test_startup_as_follower() -> anyhow::Result<()> {
-    let mut eng = eng();
-    // self.id==2 is a voter:
-    eng.state
-        .membership_state
-        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-            Some(log_id(2, 1, 3)),
-            m23(),
-        )));
+  let mut eng = eng();
+  // self.id==2 is a voter:
+  eng
+    .state
+    .membership_state
+    .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+      Some(log_id(2, 1, 3)),
+      m23(),
+    )));
 
-    eng.startup();
+  eng.startup();
 
-    assert_eq!(ServerState::Follower, eng.state.server_state);
-    assert_eq!(0, eng.output.take_commands().len());
+  assert_eq!(ServerState::Follower, eng.state.server_state);
+  assert_eq!(0, eng.output.take_commands().len());
 
-    Ok(())
+  Ok(())
 }
 
 #[test]
 fn test_startup_as_learner() -> anyhow::Result<()> {
-    let mut eng = eng();
-    // self.id==2 is not a voter:
-    eng.state
-        .membership_state
-        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-            Some(log_id(2, 1, 3)),
-            m34(),
-        )));
+  let mut eng = eng();
+  // self.id==2 is not a voter:
+  eng
+    .state
+    .membership_state
+    .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+      Some(log_id(2, 1, 3)),
+      m34(),
+    )));
 
-    eng.startup();
+  eng.startup();
 
-    assert_eq!(ServerState::Learner, eng.state.server_state);
-    assert_eq!(0, eng.output.take_commands().len());
+  assert_eq!(ServerState::Learner, eng.state.server_state);
+  assert_eq!(0, eng.output.take_commands().len());
 
-    Ok(())
+  Ok(())
 }
 
 #[test]
 fn test_startup_as_leader_leader_restore_disabled() -> anyhow::Result<()> {
-    let mut eng = eng();
-    eng.config.enable_leader_restore = false;
+  let mut eng = eng();
+  eng.config.enable_leader_restore = false;
 
-    // self.id==2 is a voter:
-    eng.state
-        .membership_state
-        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-            Some(log_id(1, 1, 3)),
-            m23(),
-        )));
-    eng.state.log_ids = LogIdList::new(None, [log_id(1, 1, 3)]);
-    // Committed vote would normally make it a leader at startup.
-    eng.state.vote = Leased::new(
-        UTConfig::<()>::now(),
-        Duration::from_millis(500),
-        Vote::new_committed(2, 2),
-    );
+  // self.id==2 is a voter:
+  eng
+    .state
+    .membership_state
+    .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+      Some(log_id(1, 1, 3)),
+      m23(),
+    )));
+  eng.state.log_ids = LogIdList::new(None, [log_id(1, 1, 3)]);
+  // Committed vote would normally make it a leader at startup.
+  eng.state.vote = Leased::new(
+    UTConfig::<()>::now(),
+    Duration::from_millis(500),
+    Vote::new_committed(2, 2),
+  );
 
-    eng.startup();
+  eng.startup();
 
-    // It does not re-elect itself; as a voter it becomes a Follower.
-    assert_eq!(ServerState::Follower, eng.state.server_state);
-    assert!(eng.leader_ref().is_none());
-    assert!(!eng.state.is_leader(&eng.config.id));
-    // The demotion is in-memory only: no command is emitted; the committed vote stays in storage.
-    assert_eq!(eng.output.take_commands(), vec![]);
-    assert_eq!(eng.state.vote_ref(), &Vote::new(2, 2));
+  // It does not re-elect itself; as a voter it becomes a Follower.
+  assert_eq!(ServerState::Follower, eng.state.server_state);
+  assert!(eng.leader_ref().is_none());
+  assert!(!eng.state.is_leader(&eng.config.id));
+  // The demotion is in-memory only: no command is emitted; the committed vote stays in storage.
+  assert_eq!(eng.output.take_commands(), vec![]);
+  assert_eq!(eng.state.vote_ref(), &Vote::new(2, 2));
 
-    Ok(())
+  Ok(())
 }

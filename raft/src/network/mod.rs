@@ -43,15 +43,12 @@ pub use raft_network::RaftNetwork;
 pub use rpc_option::RPCOption;
 pub use rpc_type::RPCTypes;
 pub use snapshot_trait::NetSnapshot;
-pub use stream_append_trait::AppendResponseStream;
-pub use stream_append_trait::NetStreamAppend;
-pub use stream_append_trait::StreamAppendFuture;
-pub use stream_append_trait::stream_append_sequential;
+pub use stream_append_trait::{
+  AppendResponseStream, NetStreamAppend, StreamAppendFuture, stream_append_sequential,
+};
 pub use transfer_leader_trait::NetTransferLeader;
 pub use vote_trait::NetVote;
-pub use zenoh::ZenohNetwork;
-pub use zenoh::ZenohNetworkConfig;
-pub use zenoh::ZenohNetworkFactory;
-pub use zenoh::ZenohRaftServer;
-pub use zenoh::ZenohSessionBuilder;
-pub use zenoh::ZenohTlsConfig;
+pub use zenoh::{
+  ZenohNetwork, ZenohNetworkConfig, ZenohNetworkFactory, ZenohRaftServer, ZenohSessionBuilder,
+  ZenohTlsConfig,
+};

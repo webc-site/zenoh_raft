@@ -7,48 +7,48 @@ use std::fmt;
 /// error occurred.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Operation {
-    /// An unknown operation.
-    None,
+  /// An unknown operation.
+  None,
 
-    /// Set a flag to allow a target replication state to revert to a previous state for one time.
-    AllowNextRevert,
+  /// Set a flag to allow a target replication state to revert to a previous state for one time.
+  AllowNextRevert,
 
-    /// Transfer leadership to the specified node.
-    TransferLeader,
+  /// Transfer leadership to the specified node.
+  TransferLeader,
 
-    /// Send a heartbeat message to a follower or learner.
-    SendHeartbeat,
+  /// Send a heartbeat message to a follower or learner.
+  SendHeartbeat,
 
-    /// Receive a snapshot.
-    ReceiveSnapshot,
+  /// Receive a snapshot.
+  ReceiveSnapshot,
 
-    /// Install a snapshot.
-    InstallSnapshot,
+  /// Install a snapshot.
+  InstallSnapshot,
 
-    /// Write application data via Raft protocol.
-    ClientWrite,
+  /// Write application data via Raft protocol.
+  ClientWrite,
 
-    /// Initialize an empty Raft node with a cluster membership config.
-    Initialize,
+  /// Initialize an empty Raft node with a cluster membership config.
+  Initialize,
 
-    /// Start an election.
-    Elect,
+  /// Start an election.
+  Elect,
 }
 
 impl fmt::Display for Operation {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Operation::None => write!(f, "(unknown operation)"),
-            Operation::AllowNextRevert => {
-                write!(f, "set flag to allow replication revert for once")
-            }
-            Operation::TransferLeader => write!(f, "transfer leadership"),
-            Operation::SendHeartbeat => write!(f, "send heartbeat"),
-            Operation::ReceiveSnapshot => write!(f, "receive snapshot"),
-            Operation::InstallSnapshot => write!(f, "install snapshot"),
-            Operation::ClientWrite => write!(f, "write application data"),
-            Operation::Initialize => write!(f, "initialize"),
-            Operation::Elect => write!(f, "elect"),
-        }
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      Operation::None => write!(f, "(unknown operation)"),
+      Operation::AllowNextRevert => {
+        write!(f, "set flag to allow replication revert for once")
+      }
+      Operation::TransferLeader => write!(f, "transfer leadership"),
+      Operation::SendHeartbeat => write!(f, "send heartbeat"),
+      Operation::ReceiveSnapshot => write!(f, "receive snapshot"),
+      Operation::InstallSnapshot => write!(f, "install snapshot"),
+      Operation::ClientWrite => write!(f, "write application data"),
+      Operation::Initialize => write!(f, "initialize"),
+      Operation::Elect => write!(f, "elect"),
     }
+  }
 }

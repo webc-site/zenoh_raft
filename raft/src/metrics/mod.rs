@@ -41,19 +41,13 @@ mod wait_test;
 use std::collections::BTreeMap;
 
 pub use metric::Metric;
-pub use raft_metrics::RaftDataMetrics;
-pub use raft_metrics::RaftMetrics;
-pub use raft_metrics::RaftServerMetrics;
-pub use recorder::MetricsRecorder;
-pub use recorder::forward_metrics;
+pub use raft_metrics::{RaftDataMetrics, RaftMetrics, RaftServerMetrics};
+pub use recorder::{MetricsRecorder, forward_metrics};
 pub use serde_instant::SerdeInstant;
-pub use wait::Wait;
-pub use wait::WaitError;
+pub use wait::{Wait, WaitError};
 pub(crate) use wait_condition::Condition;
 
-use crate::type_config::alias::LogIdOf;
-use crate::type_config::alias::NodeIdOf;
-use crate::type_config::alias::SerdeInstantOf;
+use crate::type_config::alias::{LogIdOf, NodeIdOf, SerdeInstantOf};
 
 pub(crate) type ReplicationMetrics<C> = BTreeMap<NodeIdOf<C>, Option<LogIdOf<C>>>;
 /// Heartbeat metrics, a mapping between a node's ID and the time of the last

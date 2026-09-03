@@ -1,24 +1,23 @@
-use crate::RaftTypeConfig;
-use crate::StorageError;
-use crate::errors::RPCError;
-use crate::errors::higher_vote::HigherVote;
-use crate::errors::replication_closed::ReplicationClosed;
+use crate::{
+  RaftTypeConfig, StorageError,
+  errors::{RPCError, higher_vote::HigherVote, replication_closed::ReplicationClosed},
+};
 
 /// Error variants related to the Replication.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum ReplicationError<C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    #[error(transparent)]
-    HigherVote(#[from] HigherVote<C>),
+  #[error(transparent)]
+  HigherVote(#[from] HigherVote<C>),
 
-    #[error(transparent)]
-    Closed(#[from] ReplicationClosed),
+  #[error(transparent)]
+  Closed(#[from] ReplicationClosed),
 
-    #[error(transparent)]
-    StorageError(#[from] StorageError<C>),
+  #[error(transparent)]
+  StorageError(#[from] StorageError<C>),
 
-    #[error(transparent)]
-    RPCError(#[from] RPCError<C>),
+  #[error(transparent)]
+  RPCError(#[from] RPCError<C>),
 }

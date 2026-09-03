@@ -1,11 +1,11 @@
-use std::fmt;
-use std::fmt::Formatter;
+use std::{fmt, fmt::Formatter};
 
 use display_more::DisplayOptionExt;
 
-use crate::RaftTypeConfig;
-use crate::type_config::alias::LeaderIdOf;
-use crate::type_config::alias::VoteOf;
+use crate::{
+  RaftTypeConfig,
+  type_config::alias::{LeaderIdOf, VoteOf},
+};
 
 /// Error indicating that the established leader has changed.
 ///
@@ -14,38 +14,38 @@ use crate::type_config::alias::VoteOf;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub struct LeaderChanged<C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    /// The expected established leader ID.
-    pub expected_leader: LeaderIdOf<C>,
+  /// The expected established leader ID.
+  pub expected_leader: LeaderIdOf<C>,
 
-    /// The current vote, indicating a new established leader or a candidate.
-    pub current_vote: Option<VoteOf<C>>,
+  /// The current vote, indicating a new established leader or a candidate.
+  pub current_vote: Option<VoteOf<C>>,
 }
 
 impl<C> fmt::Display for LeaderChanged<C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "LeaderChanged: from {} to vote {}",
-            self.expected_leader,
-            self.current_vote.display()
-        )
-    }
+  fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    write!(
+      f,
+      "LeaderChanged: from {} to vote {}",
+      self.expected_leader,
+      self.current_vote.display()
+    )
+  }
 }
 
 impl<C> LeaderChanged<C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    /// Create a new LeaderChanged error.
-    pub fn new(expected_leader: LeaderIdOf<C>, current_vote: Option<VoteOf<C>>) -> Self {
-        Self {
-            expected_leader,
-            current_vote,
-        }
+  /// Create a new LeaderChanged error.
+  pub fn new(expected_leader: LeaderIdOf<C>, current_vote: Option<VoteOf<C>>) -> Self {
+    Self {
+      expected_leader,
+      current_vote,
     }
+  }
 }

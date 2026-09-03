@@ -13,8 +13,8 @@ use crate::node::NodeId;
 #[error("proposed membership changes the metadata of existing node {node_id}")]
 pub struct NodeMetadataChanged<NID>
 where
-    NID: NodeId,
+  NID: NodeId,
 {
-    /// The node id whose proposed `Node` differs from the one in the current membership.
-    pub node_id: NID,
+  /// The node id whose proposed `Node` differs from the one in the current membership.
+  pub node_id: NID,
 }

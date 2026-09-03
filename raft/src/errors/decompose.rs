@@ -2,12 +2,10 @@
 
 use std::error::Error;
 
-use crate::RaftTypeConfig;
-use crate::errors::Infallible;
-use crate::errors::RPCError;
-use crate::errors::RaftError;
-use crate::errors::Unreachable;
-use crate::errors::into_ok::into_ok;
+use crate::{
+  RaftTypeConfig,
+  errors::{Infallible, RPCError, RaftError, Unreachable, into_ok::into_ok},
+};
 
 /// Simplifies error handling by extracting the inner error from a composite error.
 ///
@@ -94,70 +92,70 @@ use crate::errors::into_ok::into_ok;
 /// ```
 pub trait DecomposeResult<C, R, OuterError>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    /// The inner error type extracted from the composite error.
-    type InnerError;
+  /// The inner error type extracted from the composite error.
+  type InnerError;
 
-    /// Decompose a composite error into its inner and outer components.
-    ///
-    /// Returns:
-    /// - `Ok(Ok(r))` if the original result was successful
-    /// - `Ok(Err(inner))` if the error was an inner/API error
-    /// - `Err(outer)` if the error was an outer/fatal error
-    fn decompose(self) -> Result<Result<R, Self::InnerError>, OuterError>;
+  /// Decompose a composite error into its inner and outer components.
+  ///
+  /// Returns:
+  /// - `Ok(Ok(r))` if the original result was successful
+  /// - `Ok(Err(inner))` if the error was an inner/API error
+  /// - `Err(outer)` if the error was an outer/fatal error
+  fn decompose(self) -> Result<Result<R, Self::InnerError>, OuterError>;
 
-    /// Convert `Result<R, CompositeErr>` to `Result<R, OuterError>`,
-    /// when `Self::InnerError` is an infallible type.
-    ///
-    /// This is useful when the API error type is `Infallible`, meaning only
-    /// outer errors can occur.
-    fn decompose_infallible(self) -> Result<R, OuterError>
-    where
-        Self::InnerError: Into<Infallible>,
-        Self: Sized,
-    {
-        self.decompose().map(into_ok)
-    }
+  /// Convert `Result<R, CompositeErr>` to `Result<R, OuterError>`,
+  /// when `Self::InnerError` is an infallible type.
+  ///
+  /// This is useful when the API error type is `Infallible`, meaning only
+  /// outer errors can occur.
+  fn decompose_infallible(self) -> Result<R, OuterError>
+  where
+    Self::InnerError: Into<Infallible>,
+    Self: Sized,
+  {
+    self.decompose().map(into_ok)
+  }
 }
 
 impl<C, R, E> DecomposeResult<C, R, RaftError<C>> for Result<R, RaftError<C, E>>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    type InnerError = E;
+  type InnerError = E;
 
-    fn decompose(self) -> Result<Result<R, E>, RaftError<C>> {
-        match self {
-            Ok(r) => Ok(Ok(r)),
-            Err(e) => match e {
-                RaftError::APIError(e) => Ok(Err(e)),
-                RaftError::Fatal(e) => Err(RaftError::Fatal(e)),
-            },
-        }
+  fn decompose(self) -> Result<Result<R, E>, RaftError<C>> {
+    match self {
+      Ok(r) => Ok(Ok(r)),
+      Err(e) => match e {
+        RaftError::APIError(e) => Ok(Err(e)),
+        RaftError::Fatal(e) => Err(RaftError::Fatal(e)),
+      },
     }
+  }
 }
 
 impl<C, R, E> DecomposeResult<C, R, RPCError<C>> for Result<R, RPCError<C, RaftError<C, E>>>
 where
-    C: RaftTypeConfig,
-    E: Error,
+  C: RaftTypeConfig,
+  E: Error,
 {
-    type InnerError = E;
+  type InnerError = E;
 
-    /// `RaftError::Fatal` is considered as `RPCError::Unreachable`.
-    fn decompose(self) -> Result<Result<R, E>, RPCError<C>> {
-        match self {
-            Ok(r) => Ok(Ok(r)),
-            Err(e) => match e {
-                RPCError::Timeout(e) => Err(RPCError::Timeout(e)),
-                RPCError::Unreachable(e) => Err(RPCError::Unreachable(e)),
-                RPCError::Network(e) => Err(RPCError::Network(e)),
-                RPCError::RemoteError(e) => match e.source {
-                    RaftError::APIError(e) => Ok(Err(e)),
-                    RaftError::Fatal(e) => Err(RPCError::Unreachable(Unreachable::new(&e))),
-                },
-            },
-        }
+  /// `RaftError::Fatal` is considered as `RPCError::Unreachable`.
+  fn decompose(self) -> Result<Result<R, E>, RPCError<C>> {
+    match self {
+      Ok(r) => Ok(Ok(r)),
+      Err(e) => match e {
+        RPCError::Timeout(e) => Err(RPCError::Timeout(e)),
+        RPCError::Unreachable(e) => Err(RPCError::Unreachable(e)),
+        RPCError::Network(e) => Err(RPCError::Network(e)),
+        RPCError::RemoteError(e) => match e.source {
+          RaftError::APIError(e) => Ok(Err(e)),
+          RaftError::Fatal(e) => Err(RPCError::Unreachable(Unreachable::new(&e))),
+        },
+      },
     }
+  }
 }

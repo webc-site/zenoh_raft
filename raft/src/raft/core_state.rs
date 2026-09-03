@@ -1,20 +1,20 @@
-use crate::RaftTypeConfig;
-use crate::errors::Fatal;
-use crate::errors::Infallible;
-use crate::type_config::alias::JoinHandleOf;
-use crate::type_config::alias::WatchReceiverOf;
+use crate::{
+  RaftTypeConfig,
+  errors::{Fatal, Infallible},
+  type_config::alias::{JoinHandleOf, WatchReceiverOf},
+};
 
 /// The running state of RaftCore
 pub(in crate::raft) enum CoreState<C>
 where
-    C: RaftTypeConfig,
+  C: RaftTypeConfig,
 {
-    /// The RaftCore task is still running.
-    Running(JoinHandleOf<C, Result<Infallible, Fatal<C>>>),
+  /// The RaftCore task is still running.
+  Running(JoinHandleOf<C, Result<Infallible, Fatal<C>>>),
 
-    /// The RaftCore task is waiting for a signal to finish joining.
-    Joining(WatchReceiverOf<C, bool>),
+  /// The RaftCore task is waiting for a signal to finish joining.
+  Joining(WatchReceiverOf<C, bool>),
 
-    /// The RaftCore task has finished. The return value of the task is stored.
-    Done(Result<Infallible, Fatal<C>>),
+  /// The RaftCore task has finished. The return value of the task is stored.
+  Done(Result<Infallible, Fatal<C>>),
 }

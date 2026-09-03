@@ -1,79 +1,78 @@
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use maplit::btreeset;
 
-use crate::Membership;
-use crate::MembershipState;
-use crate::Vote;
-use crate::core::ServerState;
-use crate::engine::Engine;
-use crate::engine::testing::UTConfig;
-use crate::engine::testing::log_id;
-use crate::type_config::TypeConfigExt;
-use crate::type_config::alias::StoredMembershipOf;
-use crate::utime::Leased;
+use crate::{
+  Membership, MembershipState, Vote,
+  core::ServerState,
+  engine::{
+    Engine,
+    testing::{UTConfig, log_id},
+  },
+  type_config::{TypeConfigExt, alias::StoredMembershipOf},
+  utime::Leased,
+};
 
 fn m01() -> Membership<u64, ()> {
-    Membership::<u64, ()>::new_with_defaults(vec![btreeset! {0,1}], [])
+  Membership::<u64, ()>::new_with_defaults(vec![btreeset! {0,1}], [])
 }
 
 fn m23() -> Membership<u64, ()> {
-    Membership::<u64, ()>::new_with_defaults(vec![btreeset! {2,3}], [])
+  Membership::<u64, ()>::new_with_defaults(vec![btreeset! {2,3}], [])
 }
 
 fn m34() -> Membership<u64, ()> {
-    Membership::<u64, ()>::new_with_defaults(vec![btreeset! {3,4}], [])
+  Membership::<u64, ()>::new_with_defaults(vec![btreeset! {3,4}], [])
 }
 
 fn eng() -> Engine<UTConfig> {
-    let mut eng = Engine::testing_default(0);
-    eng.config.id = 2;
-    eng.state.vote = Leased::new(
-        UTConfig::<()>::now(),
-        Duration::from_millis(500),
-        Vote::new_committed(2, 1),
-    );
-    eng.state.membership_state = MembershipState::new(
-        Arc::new(StoredMembershipOf::<UTConfig>::new(
-            Some(log_id(1, 1, 1)),
-            m01(),
-        )),
-        Arc::new(StoredMembershipOf::<UTConfig>::new(
-            Some(log_id(2, 1, 3)),
-            m23(),
-        )),
-    );
+  let mut eng = Engine::testing_default(0);
+  eng.config.id = 2;
+  eng.state.vote = Leased::new(
+    UTConfig::<()>::now(),
+    Duration::from_millis(500),
+    Vote::new_committed(2, 1),
+  );
+  eng.state.membership_state = MembershipState::new(
+    Arc::new(StoredMembershipOf::<UTConfig>::new(
+      Some(log_id(1, 1, 1)),
+      m01(),
+    )),
+    Arc::new(StoredMembershipOf::<UTConfig>::new(
+      Some(log_id(2, 1, 3)),
+      m23(),
+    )),
+  );
 
-    eng.state.server_state = eng.calc_server_state();
-    eng
+  eng.state.server_state = eng.calc_server_state();
+  eng
 }
 
 #[test]
 fn test_update_committed_membership_at_index_4() -> anyhow::Result<()> {
-    // replace effective membership
-    let mut eng = eng();
+  // replace effective membership
+  let mut eng = eng();
 
-    eng.following_handler().membership_install_snapshot(
-        StoredMembershipOf::<UTConfig>::new(Some(log_id(3, 1, 4)), m34()),
-        4,
-    );
+  eng.following_handler().membership_install_snapshot(
+    StoredMembershipOf::<UTConfig>::new(Some(log_id(3, 1, 4)), m34()),
+    4,
+  );
 
-    assert_eq!(
-        MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(
-                Some(log_id(3, 1, 4)),
-                m34()
-            )),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(
-                Some(log_id(3, 1, 4)),
-                m34()
-            ))
-        ),
-        eng.state.membership_state
-    );
-    assert_eq!(ServerState::Learner, eng.state.server_state);
-    assert!(eng.output.take_commands().is_empty());
+  assert_eq!(
+    MembershipState::new(
+      Arc::new(StoredMembershipOf::<UTConfig>::new(
+        Some(log_id(3, 1, 4)),
+        m34()
+      )),
+      Arc::new(StoredMembershipOf::<UTConfig>::new(
+        Some(log_id(3, 1, 4)),
+        m34()
+      ))
+    ),
+    eng.state.membership_state
+  );
+  assert_eq!(ServerState::Learner, eng.state.server_state);
+  assert!(eng.output.take_commands().is_empty());
 
-    Ok(())
+  Ok(())
 }

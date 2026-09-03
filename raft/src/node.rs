@@ -22,11 +22,10 @@
 //! Applications can use built-in types or define custom [`Node`] implementations to store
 //! additional metadata like datacenter location, priority, or capabilities.
 
-use std::fmt::Debug;
-use std::fmt::Display;
-use std::fmt::Formatter;
-use std::fmt::Result as FmtResult;
-use std::hash::Hash;
+use std::{
+  fmt::{Debug, Display, Formatter, Result as FmtResult},
+  hash::Hash,
+};
 
 use crate::base::OptionalFeatures;
 
@@ -43,32 +42,32 @@ use crate::base::OptionalFeatures;
 /// [node-id-reuse]: crate::docs::cluster_control::dynamic_membership#node-ids-must-not-be-reused
 pub trait NodeId
 where
-    Self: Sized
-        + OptionalFeatures
-        + Eq
-        + PartialEq
-        + Ord
-        + PartialOrd
-        + Debug
-        + Display
-        + Hash
-        + Clone
-        + 'static,
+  Self: Sized
+    + OptionalFeatures
+    + Eq
+    + PartialEq
+    + Ord
+    + PartialOrd
+    + Debug
+    + Display
+    + Hash
+    + Clone
+    + 'static,
 {
 }
 
 impl<T> NodeId for T where
-    T: Sized
-        + OptionalFeatures
-        + Eq
-        + PartialEq
-        + Ord
-        + PartialOrd
-        + Debug
-        + Display
-        + Hash
-        + Clone
-        + 'static
+  T: Sized
+    + OptionalFeatures
+    + Eq
+    + PartialEq
+    + Ord
+    + PartialOrd
+    + Debug
+    + Display
+    + Hash
+    + Clone
+    + 'static
 {
 }
 
@@ -79,7 +78,7 @@ impl<T> NodeId for T where
 /// information.
 pub trait Node
 where
-    Self: Sized + OptionalFeatures + Eq + PartialEq + Debug + Clone + 'static,
+  Self: Sized + OptionalFeatures + Eq + PartialEq + Debug + Clone + 'static,
 {
 }
 
@@ -92,22 +91,22 @@ impl<T> Node for T where T: Sized + OptionalFeatures + Eq + PartialEq + Debug + 
 pub struct EmptyNode {}
 
 impl Default for EmptyNode {
-    fn default() -> Self {
-        Self::new()
-    }
+  fn default() -> Self {
+    Self::new()
+  }
 }
 
 impl EmptyNode {
-    /// Creates an [`EmptyNode`].
-    pub fn new() -> Self {
-        Self {}
-    }
+  /// Creates an [`EmptyNode`].
+  pub fn new() -> Self {
+    Self {}
+  }
 }
 
 impl Display for EmptyNode {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "{{}}")
-    }
+  fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    write!(f, "{{}}")
+  }
 }
 
 /// An implementation of the [`Node`] trait that contains minimal node information.
@@ -120,33 +119,33 @@ impl Display for EmptyNode {
 /// mapping.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, bitcode::Encode, bitcode::Decode)]
 pub struct BasicNode {
-    /// A user-defined string that represents the endpoint of the target node.
-    ///
-    /// It is used by [`RaftNetwork`](crate::RaftNetwork) for connecting to the target node.
-    pub addr: String,
+  /// A user-defined string that represents the endpoint of the target node.
+  ///
+  /// It is used by [`RaftNetwork`](crate::RaftNetwork) for connecting to the target node.
+  pub addr: String,
 }
 
 impl Default for BasicNode {
-    fn default() -> Self {
-        Self {
-            addr: "localhost".to_string(),
-        }
+  fn default() -> Self {
+    Self {
+      addr: "localhost".to_string(),
     }
+  }
 }
 
 impl BasicNode {
-    /// Creates as [`BasicNode`].
-    pub fn new(addr: impl ToString) -> Self {
-        Self {
-            addr: addr.to_string(),
-        }
+  /// Creates as [`BasicNode`].
+  pub fn new(addr: impl ToString) -> Self {
+    Self {
+      addr: addr.to_string(),
     }
+  }
 }
 
 impl Display for BasicNode {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "{}", self.addr)
-    }
+  fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    write!(f, "{}", self.addr)
+  }
 }
 
 /// An implementation of the [`Node`] trait that contains a Raft address and user-defined data.
@@ -156,62 +155,60 @@ impl Display for BasicNode {
 /// metadata, such as a public API address.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, bitcode::Encode, bitcode::Decode)]
 pub struct NodeInfo {
-    /// Address used by [`RaftNetwork`](crate::RaftNetwork) to contact the target node.
-    pub raft_addr: String,
+  /// Address used by [`RaftNetwork`](crate::RaftNetwork) to contact the target node.
+  pub raft_addr: String,
 
-    /// User-defined data interpreted by the application.
-    pub data: String,
+  /// User-defined data interpreted by the application.
+  pub data: String,
 }
 
 impl Default for NodeInfo {
-    fn default() -> Self {
-        Self {
-            raft_addr: "localhost".to_string(),
-            data: "".to_string(),
-        }
+  fn default() -> Self {
+    Self {
+      raft_addr: "localhost".to_string(),
+      data: "".to_string(),
     }
+  }
 }
 
 impl NodeInfo {
-    /// Creates a [`NodeInfo`].
-    pub fn new(raft_addr: impl ToString, data: impl ToString) -> Self {
-        Self {
-            raft_addr: raft_addr.to_string(),
-            data: data.to_string(),
-        }
+  /// Creates a [`NodeInfo`].
+  pub fn new(raft_addr: impl ToString, data: impl ToString) -> Self {
+    Self {
+      raft_addr: raft_addr.to_string(),
+      data: data.to_string(),
     }
+  }
 }
 
 impl Display for NodeInfo {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "raft_addr: {}, data: {}", self.raft_addr, self.data)
-    }
+  fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    write!(f, "raft_addr: {}, data: {}", self.raft_addr, self.data)
+  }
 }
 
 #[cfg(test)]
 mod tests {
 
-    use std::fmt::Display;
-    use std::fmt::Formatter;
-    use std::fmt::Result;
+  use std::fmt::{Display, Formatter, Result};
 
-    use crate::NodeId;
+  use crate::NodeId;
 
-    #[test]
-    fn node_id_default_impl() {
-        /// Automatically implemented trait [`NodeId`] for this struct.
-        #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
-        struct AutoNodeId;
+  #[test]
+  fn node_id_default_impl() {
+    /// Automatically implemented trait [`NodeId`] for this struct.
+    #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+    struct AutoNodeId;
 
-        impl Display for AutoNodeId {
-            fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-                write!(f, "FooNodeId")
-            }
-        }
-
-        /// Assert a value implements the trait [`NodeId`].
-        fn assert_node_id<NID: NodeId>(_: &NID) {}
-
-        assert_node_id(&AutoNodeId);
+    impl Display for AutoNodeId {
+      fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(f, "FooNodeId")
+      }
     }
+
+    /// Assert a value implements the trait [`NodeId`].
+    fn assert_node_id<NID: NodeId>(_: &NID) {}
+
+    assert_node_id(&AutoNodeId);
+  }
 }

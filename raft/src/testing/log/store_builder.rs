@@ -1,9 +1,9 @@
 use zenoh_raft_macros::add_async_trait;
 
-use crate::RaftTypeConfig;
-use crate::StorageError;
-use crate::storage::RaftLogStorage;
-use crate::storage::RaftStateMachine;
+use crate::{
+  RaftTypeConfig, StorageError,
+  storage::{RaftLogStorage, RaftStateMachine},
+};
 
 /// The trait to build a [`RaftLogStorage`] and [`RaftStateMachine`] implementation.
 ///
@@ -18,10 +18,10 @@ use crate::storage::RaftStateMachine;
 #[add_async_trait]
 pub trait StoreBuilder<C, LS, SM, G = ()>: Send + Sync
 where
-    C: RaftTypeConfig,
-    LS: RaftLogStorage<C>,
-    SM: RaftStateMachine<C>,
+  C: RaftTypeConfig,
+  LS: RaftLogStorage<C>,
+  SM: RaftStateMachine<C>,
 {
-    /// Build a [`RaftLogStorage`] and [`RaftStateMachine`] implementation
-    async fn build(&self) -> Result<(G, LS, SM), StorageError<C>>;
+  /// Build a [`RaftLogStorage`] and [`RaftStateMachine`] implementation
+  async fn build(&self) -> Result<(G, LS, SM), StorageError<C>>;
 }

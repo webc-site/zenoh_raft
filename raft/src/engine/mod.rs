@@ -44,28 +44,25 @@ pub(crate) mod time_state;
 
 #[cfg(test)]
 mod tests {
-    mod append_entries_test;
-    mod elect_test;
-    mod handle_pre_vote_req_test;
-    mod handle_pre_vote_resp_test;
-    mod handle_vote_req_test;
-    mod handle_vote_resp_test;
-    mod initialize_test;
-    mod install_full_snapshot_test;
-    mod pre_elect_test;
-    mod refresh_server_state_test;
-    mod startup_test;
-    mod trigger_purge_log_test;
+  mod append_entries_test;
+  mod elect_test;
+  mod handle_pre_vote_req_test;
+  mod handle_pre_vote_resp_test;
+  mod handle_vote_req_test;
+  mod handle_vote_resp_test;
+  mod initialize_test;
+  mod install_full_snapshot_test;
+  mod pre_elect_test;
+  mod refresh_server_state_test;
+  mod startup_test;
+  mod trigger_purge_log_test;
 }
 #[cfg(test)]
 mod log_id_list_test;
 #[cfg(test)]
 pub(crate) mod testing;
 
-pub(crate) use command::Command;
-pub(crate) use command::Condition;
-pub(crate) use command::Respond;
-pub(crate) use command::ValueSender;
+pub(crate) use command::{Command, Condition, Respond, ValueSender};
 pub(crate) use engine_config::EngineConfig;
 pub(crate) use engine_impl::Engine;
 pub(crate) use engine_output::EngineOutput;

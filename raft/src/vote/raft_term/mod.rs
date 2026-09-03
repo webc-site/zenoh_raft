@@ -1,7 +1,6 @@
 mod raft_term_impls;
 
-use std::fmt::Debug;
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 
 use crate::base::OptionalFeatures;
 
@@ -13,17 +12,17 @@ use crate::base::OptionalFeatures;
 /// Common implementations are provided for standard integer types like `u64`, `u32`, etc.
 pub trait RaftTerm
 where
-    Self: OptionalFeatures + Ord + Debug + Display + Copy + Default + 'static,
+  Self: OptionalFeatures + Ord + Debug + Display + Copy + Default + 'static,
 {
-    /// Returns the next term.
-    ///
-    /// Must satisfy: `self < self.next()`
-    fn next(&self) -> Self;
+  /// Returns the next term.
+  ///
+  /// Must satisfy: `self < self.next()`
+  fn next(&self) -> Self;
 
-    /// Convert to u64 for metrics recording.
-    ///
-    /// Returns `None` if the term cannot be represented as u64.
-    /// Implementers must explicitly choose whether their term type
-    /// can be converted to u64 for metrics purposes.
-    fn as_u64(&self) -> Option<u64>;
+  /// Convert to u64 for metrics recording.
+  ///
+  /// Returns `None` if the term cannot be represented as u64.
+  /// Implementers must explicitly choose whether their term type
+  /// can be converted to u64 for metrics purposes.
+  fn as_u64(&self) -> Option<u64>;
 }

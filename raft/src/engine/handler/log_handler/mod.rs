@@ -1,15 +1,13 @@
 use display_more::DisplayOptionExt;
 
-use crate::LogIdOptionExt;
-use crate::RaftState;
-use crate::RaftTypeConfig;
-use crate::engine::Command;
-use crate::engine::EngineConfig;
-use crate::engine::EngineOutput;
-use crate::log_id::option_ref_log_id_ext::OptionRefLogIdExt;
-use crate::raft_state::LogStateReader;
-use crate::storage::RaftStateMachine;
-use crate::type_config::alias::LogIdOf;
+use crate::{
+  LogIdOptionExt, RaftState, RaftTypeConfig,
+  engine::{Command, EngineConfig, EngineOutput},
+  log_id::option_ref_log_id_ext::OptionRefLogIdExt,
+  raft_state::LogStateReader,
+  storage::RaftStateMachine,
+  type_config::alias::LogIdOf,
+};
 
 #[cfg(test)]
 mod calc_purge_upto_test;
@@ -19,115 +17,115 @@ mod purge_log_test;
 /// Handle raft-log related operations
 pub(crate) struct LogHandler<'x, C, SM = ()>
 where
-    C: RaftTypeConfig,
-    SM: RaftStateMachine<C>,
+  C: RaftTypeConfig,
+  SM: RaftStateMachine<C>,
 {
-    pub(crate) config: &'x mut EngineConfig<C>,
-    pub(crate) state: &'x mut RaftState<C>,
-    pub(crate) output: &'x mut EngineOutput<C, SM>,
+  pub(crate) config: &'x mut EngineConfig<C>,
+  pub(crate) state: &'x mut RaftState<C>,
+  pub(crate) output: &'x mut EngineOutput<C, SM>,
 }
 
 impl<'x, C, SM> LogHandler<'x, C, SM>
 where
-    C: RaftTypeConfig,
-    SM: RaftStateMachine<C>,
+  C: RaftTypeConfig,
+  SM: RaftStateMachine<C>,
 {
-    pub(crate) fn new(
-        config: &'x mut EngineConfig<C>,
-        state: &'x mut RaftState<C>,
-        output: &'x mut EngineOutput<C, SM>,
-    ) -> Self {
-        Self {
-            config,
-            state,
-            output,
-        }
+  pub(crate) fn new(
+    config: &'x mut EngineConfig<C>,
+    state: &'x mut RaftState<C>,
+    output: &'x mut EngineOutput<C, SM>,
+  ) -> Self {
+    Self {
+      config,
+      state,
+      output,
+    }
+  }
+
+  /// Purge log entries up to `RaftState.purge_upto()`, inclusive.
+  pub(crate) fn purge_log(&mut self) {
+    let st = &mut self.state;
+    let purge_upto = st.purge_upto();
+
+    log::info!(
+      "purge log, last_purged: {}, purge_upto: {}",
+      st.last_purged_log_id().display(),
+      purge_upto.display()
+    );
+
+    if purge_upto <= st.last_purged_log_id() {
+      return;
     }
 
-    /// Purge log entries up to `RaftState.purge_upto()`, inclusive.
-    pub(crate) fn purge_log(&mut self) {
-        let st = &mut self.state;
-        let purge_upto = st.purge_upto();
+    let upto = purge_upto.unwrap().clone();
 
-        log::info!(
-            "purge log, last_purged: {}, purge_upto: {}",
-            st.last_purged_log_id().display(),
-            purge_upto.display()
-        );
+    st.purge_log(&upto);
+    self.output.push_command(Command::PurgeLog { upto });
+  }
 
-        if purge_upto <= st.last_purged_log_id() {
-            return;
-        }
+  /// Update the next log id to purge up to, if more logs can be purged, according to the
+  /// configured policy.
+  ///
+  /// This method is called after building a snapshot because openraft only purges logs that are
+  /// already included in the snapshot.
+  pub(crate) fn schedule_policy_based_purge(&mut self) {
+    if let Some(purge_upto) = self.calc_purge_upto() {
+      self.update_purge_upto(purge_upto);
+    }
+  }
 
-        let upto = purge_upto.unwrap().clone();
+  /// Update the log id it expects to purge up to. It won't trigger the purge immediately.
+  pub(crate) fn update_purge_upto(&mut self, purge_upto: LogIdOf<C>) {
+    debug_assert!(self.state.purge_upto() <= Some(&purge_upto));
+    self.state.purge_upto = Some(purge_upto);
+  }
 
-        st.purge_log(&upto);
-        self.output.push_command(Command::PurgeLog { upto });
+  /// Calculate the log id up to which to purge, inclusive.
+  ///
+  /// Only logs included in the snapshot will be purged.
+  /// It may return None if there is no log to purge.
+  ///
+  /// `max_keep` specifies the number of applied logs to keep.
+  /// `max_keep==0` means every applied log can be purged.
+  pub(crate) fn calc_purge_upto(&self) -> Option<LogIdOf<C>> {
+    let st = &self.state;
+    let max_keep = self.config.max_in_snapshot_log_to_keep;
+    let batch_size = self.config.purge_batch_size;
+
+    let purge_end = self
+      .state
+      .snapshot_meta
+      .last_log_id
+      .next_index()
+      .saturating_sub(max_keep);
+
+    log::debug!(
+      "calculate purge range: up to index {}, snapshot_last_log_id: {:?}, max_keep: {}",
+      purge_end,
+      self.state.snapshot_meta.last_log_id,
+      max_keep
+    );
+
+    if st.last_purged_log_id().next_index() + batch_size > purge_end {
+      log::debug!(
+        "skip purge: batch not full, snapshot_last_log_id: {:?}, max_keep: {}, last_purged: {}, batch_size: {}, purge_end: {}",
+        self.state.snapshot_meta.last_log_id,
+        max_keep,
+        st.last_purged_log_id().display(),
+        batch_size,
+        purge_end
+      );
+      return None;
     }
 
-    /// Update the next log id to purge up to, if more logs can be purged, according to the
-    /// configured policy.
-    ///
-    /// This method is called after building a snapshot because openraft only purges logs that are
-    /// already included in the snapshot.
-    pub(crate) fn schedule_policy_based_purge(&mut self) {
-        if let Some(purge_upto) = self.calc_purge_upto() {
-            self.update_purge_upto(purge_upto);
-        }
-    }
+    let log_id = self.state.log_ids.ref_at(purge_end - 1);
+    debug_assert!(
+      log_id.is_some(),
+      "log id not found at {}, engine.state:{:?}",
+      purge_end - 1,
+      st
+    );
 
-    /// Update the log id it expects to purge up to. It won't trigger the purge immediately.
-    pub(crate) fn update_purge_upto(&mut self, purge_upto: LogIdOf<C>) {
-        debug_assert!(self.state.purge_upto() <= Some(&purge_upto));
-        self.state.purge_upto = Some(purge_upto);
-    }
-
-    /// Calculate the log id up to which to purge, inclusive.
-    ///
-    /// Only logs included in the snapshot will be purged.
-    /// It may return None if there is no log to purge.
-    ///
-    /// `max_keep` specifies the number of applied logs to keep.
-    /// `max_keep==0` means every applied log can be purged.
-    pub(crate) fn calc_purge_upto(&self) -> Option<LogIdOf<C>> {
-        let st = &self.state;
-        let max_keep = self.config.max_in_snapshot_log_to_keep;
-        let batch_size = self.config.purge_batch_size;
-
-        let purge_end = self
-            .state
-            .snapshot_meta
-            .last_log_id
-            .next_index()
-            .saturating_sub(max_keep);
-
-        log::debug!(
-            "calculate purge range: up to index {}, snapshot_last_log_id: {:?}, max_keep: {}",
-            purge_end,
-            self.state.snapshot_meta.last_log_id,
-            max_keep
-        );
-
-        if st.last_purged_log_id().next_index() + batch_size > purge_end {
-            log::debug!(
-                "skip purge: batch not full, snapshot_last_log_id: {:?}, max_keep: {}, last_purged: {}, batch_size: {}, purge_end: {}",
-                self.state.snapshot_meta.last_log_id,
-                max_keep,
-                st.last_purged_log_id().display(),
-                batch_size,
-                purge_end
-            );
-            return None;
-        }
-
-        let log_id = self.state.log_ids.ref_at(purge_end - 1);
-        debug_assert!(
-            log_id.is_some(),
-            "log id not found at {}, engine.state:{:?}",
-            purge_end - 1,
-            st
-        );
-
-        log_id.to_log_id()
-    }
+    log_id.to_log_id()
+  }
 }

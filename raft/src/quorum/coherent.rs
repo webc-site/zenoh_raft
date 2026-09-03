@@ -7,29 +7,29 @@ use crate::quorum::QuorumSet;
 /// restriction is to disable another smaller candidate to elect.
 pub(crate) trait Coherent<ID, Other>
 where
-    ID: PartialOrd + Ord + 'static,
-    Self: QuorumSet<Id = ID>,
-    Other: QuorumSet<Id = ID>,
+  ID: PartialOrd + Ord + 'static,
+  Self: QuorumSet<Id = ID>,
+  Other: QuorumSet<Id = ID>,
 {
-    /// Returns `true` if this QuorumSet is coherent with the other quorum set.
-    fn is_coherent_with(&self, other: &Other) -> bool;
+  /// Returns `true` if this QuorumSet is coherent with the other quorum set.
+  fn is_coherent_with(&self, other: &Other) -> bool;
 }
 
 pub(crate) trait FindCoherent<ID, Other>
 where
-    ID: PartialOrd + Ord + 'static,
-    Self: QuorumSet<Id = ID>,
-    Other: QuorumSet<Id = ID>,
+  ID: PartialOrd + Ord + 'static,
+  Self: QuorumSet<Id = ID>,
+  Other: QuorumSet<Id = ID>,
 {
-    /// Build a QuorumSet `X` so that `self` is coherent with `X` and `X` is coherent with `other`,
-    /// i.e., `self ~ X ~ other`.
-    /// Then `X` is the intermediate QuorumSet when changing membership from `self` to `other`.
-    ///
-    /// E.g.(`cᵢcⱼ` is a joint of `cᵢ` and `cⱼ`):
-    /// - `c₁.find_coherent(c₁)`   returns `c₁`
-    /// - `c₁.find_coherent(c₂)`   returns `c₁c₂`
-    /// - `c₁c₂.find_coherent(c₂)` returns `c₂`
-    /// - `c₁c₂.find_coherent(c₁)` returns `c₁`
-    /// - `c₁c2.find_coherent(c₃)` returns `c₂c₃`
-    fn find_coherent(&self, other: Other) -> Self;
+  /// Build a QuorumSet `X` so that `self` is coherent with `X` and `X` is coherent with `other`,
+  /// i.e., `self ~ X ~ other`.
+  /// Then `X` is the intermediate QuorumSet when changing membership from `self` to `other`.
+  ///
+  /// E.g.(`cᵢcⱼ` is a joint of `cᵢ` and `cⱼ`):
+  /// - `c₁.find_coherent(c₁)`   returns `c₁`
+  /// - `c₁.find_coherent(c₂)`   returns `c₁c₂`
+  /// - `c₁c₂.find_coherent(c₂)` returns `c₂`
+  /// - `c₁c₂.find_coherent(c₁)` returns `c₁`
+  /// - `c₁c2.find_coherent(c₃)` returns `c₂c₃`
+  fn find_coherent(&self, other: Other) -> Self;
 }

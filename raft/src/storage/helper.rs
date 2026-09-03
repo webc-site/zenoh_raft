@@ -1,484 +1,482 @@
-use futures_util::stream;
-use std::cmp::{max, min};
-use std::marker::PhantomData;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+  cmp::{max, min},
+  marker::PhantomData,
+  sync::Arc,
+  time::Duration,
+};
 
 use display_more::DisplayOptionExt;
+use futures_util::stream;
 use validit::Valid;
 
-use crate::LogIdOptionExt;
-use crate::RaftLogReader;
-use crate::RaftSnapshotBuilder;
-use crate::RaftState;
-use crate::RaftTypeConfig;
-use crate::StorageError;
-use crate::base::shared_id_generator::SharedIdGenerator;
-use crate::engine::LogIdList;
-use crate::entry::RaftEntry;
-use crate::errors::StorageIOResult;
-use crate::raft_state::IOState;
-use crate::storage::RaftLogStorage;
-use crate::storage::RaftStateMachine;
-use crate::storage::log_reader_ext::RaftLogReaderExt;
-use crate::type_config::TypeConfigExt;
-use crate::type_config::alias::CommittedLeaderIdOf;
-use crate::type_config::alias::LeaderIdOf;
-use crate::type_config::alias::LogIdOf;
-use crate::type_config::alias::MembershipStateOf;
-use crate::type_config::alias::StoredMembershipOf;
-use crate::type_config::alias::TermOf;
-use crate::type_config::alias::VoteOf;
-use crate::utime::Leased;
-use crate::vote::RaftLeaderId;
-use crate::vote::RaftVote;
+use crate::{
+  LogIdOptionExt, RaftLogReader, RaftSnapshotBuilder, RaftState, RaftTypeConfig, StorageError,
+  base::shared_id_generator::SharedIdGenerator,
+  engine::LogIdList,
+  entry::RaftEntry,
+  errors::StorageIOResult,
+  raft_state::IOState,
+  storage::{RaftLogStorage, RaftStateMachine, log_reader_ext::RaftLogReaderExt},
+  type_config::{
+    TypeConfigExt,
+    alias::{
+      CommittedLeaderIdOf, LeaderIdOf, LogIdOf, MembershipStateOf, StoredMembershipOf, TermOf,
+      VoteOf,
+    },
+  },
+  utime::Leased,
+  vote::{RaftLeaderId, RaftVote},
+};
 
 /// StorageHelper provides additional methods to access a [`RaftLogStorage`] and
 /// [`RaftStateMachine`] implementation.
 pub struct StorageHelper<'a, C, LS, SM>
 where
-    C: RaftTypeConfig,
-    LS: RaftLogStorage<C>,
-    SM: RaftStateMachine<C>,
+  C: RaftTypeConfig,
+  LS: RaftLogStorage<C>,
+  SM: RaftStateMachine<C>,
 {
-    pub(crate) log_store: &'a mut LS,
-    pub(crate) state_machine: &'a mut SM,
+  pub(crate) log_store: &'a mut LS,
+  pub(crate) state_machine: &'a mut SM,
 
-    id: Option<C::NodeId>,
-    id_str: String,
+  id: Option<C::NodeId>,
+  id_str: String,
 
-    _p: PhantomData<C>,
+  _p: PhantomData<C>,
 }
 
 impl<'a, C, LS, SM> StorageHelper<'a, C, LS, SM>
 where
-    C: RaftTypeConfig,
-    LS: RaftLogStorage<C>,
-    SM: RaftStateMachine<C>,
+  C: RaftTypeConfig,
+  LS: RaftLogStorage<C>,
+  SM: RaftStateMachine<C>,
 {
-    /// Creates a new `StorageHelper` that provides additional functions based on the underlying
-    ///  [`RaftLogStorage`] and [`RaftStateMachine`] implementation.
-    pub fn new(sto: &'a mut LS, sm: &'a mut SM) -> Self {
-        Self {
-            log_store: sto,
-            state_machine: sm,
-            id: None,
-            id_str: "xx".to_string(),
-            _p: Default::default(),
-        }
+  /// Creates a new `StorageHelper` that provides additional functions based on the underlying
+  ///  [`RaftLogStorage`] and [`RaftStateMachine`] implementation.
+  pub fn new(sto: &'a mut LS, sm: &'a mut SM) -> Self {
+    Self {
+      log_store: sto,
+      state_machine: sm,
+      id: None,
+      id_str: "xx".to_string(),
+      _p: Default::default(),
+    }
+  }
+
+  /// Set the ID of this node
+  pub fn with_id(mut self, id: C::NodeId) -> Self {
+    self.id_str = id.to_string();
+    self.id = Some(id);
+    self
+  }
+
+  // TODO: let RaftStore store node-id.
+  //       To achieve this, RaftLogStorage must store node-id
+  //       To achieve this, RaftLogStorage has to provide API to initialize with a node id and API to
+  //       read node-id
+  /// Get Raft's state information from storage.
+  ///
+  /// When the Raft node is first started, it will call this interface to fetch the last known
+  /// state from stable storage.
+  pub async fn get_initial_state(&mut self) -> Result<RaftState<C>, StorageError<C>> {
+    let mut log_reader = self.log_store.get_log_reader().await;
+    let vote = log_reader.read_vote().await.sto_read_vote()?;
+    // When absent, create a default value for this node.
+    let vote = vote.unwrap_or_else(|| {
+      let leader_id = LeaderIdOf::<C>::new(TermOf::<C>::default(), self.id.clone().unwrap());
+      VoteOf::<C>::from_leader_id(leader_id, false)
+    });
+
+    let mut committed = self.log_store.read_committed().await.sto_read_logs()?;
+
+    let st = self.log_store.get_log_state().await.sto_read_logs()?;
+    let mut last_purged_log_id = st.last_purged_log_id;
+    let mut last_log_id = st.last_log_id;
+
+    let (last_applied, _) = self.state_machine.applied_state().await.sto_read_sm()?;
+
+    log::info!(
+      "get_initial_state: vote: {}, last_purged_log_id: {}, last_applied: {}, committed: {}, last_log_id: {}",
+      vote,
+      last_purged_log_id.display(),
+      last_applied.display(),
+      committed.display(),
+      last_log_id.display()
+    );
+
+    // The stored log range is `(last_purged_log_id, last_log_id]`: an inversion means the
+    // log store is corrupted, e.g., by a snapshot inconsistent with the local logs.
+    if last_log_id < last_purged_log_id {
+      let err = C::err_from_string(format!(
+        "inverted log order in log store: last_log_id({}) < last_purged_log_id({}); the log store is corrupted",
+        last_log_id.display(),
+        last_purged_log_id.display(),
+      ));
+      return Err(StorageError::read_logs(err));
     }
 
-    /// Set the ID of this node
-    pub fn with_id(mut self, id: C::NodeId) -> Self {
-        self.id_str = id.to_string();
-        self.id = Some(id);
-        self
+    // TODO: It is possible `committed < last_applied` because when installing snapshot,
+    //       new committed should be saved, but not yet.
+    if committed < last_applied {
+      committed = last_applied.clone();
     }
 
-    // TODO: let RaftStore store node-id.
-    //       To achieve this, RaftLogStorage must store node-id
-    //       To achieve this, RaftLogStorage has to provide API to initialize with a node id and API to
-    //       read node-id
-    /// Get Raft's state information from storage.
-    ///
-    /// When the Raft node is first started, it will call this interface to fetch the last known
-    /// state from stable storage.
-    pub async fn get_initial_state(&mut self) -> Result<RaftState<C>, StorageError<C>> {
-        let mut log_reader = self.log_store.get_log_reader().await;
-        let vote = log_reader.read_vote().await.sto_read_vote()?;
-        // When absent, create a default value for this node.
-        let vote = vote.unwrap_or_else(|| {
-            let leader_id = LeaderIdOf::<C>::new(TermOf::<C>::default(), self.id.clone().unwrap());
-            VoteOf::<C>::from_leader_id(leader_id, false)
-        });
+    // For transient state machines: install persistent snapshot to restore state efficiently.
+    self.restore_from_snapshot().await?;
+    let (mut last_applied, _) = self.state_machine.applied_state().await.sto_read_sm()?;
 
-        let mut committed = self.log_store.read_committed().await.sto_read_logs()?;
+    // Re-apply log entries to recover SM to latest state.
+    // For transient state machines, this re-applies logs from snapshot position to committed.
+    if last_applied < committed {
+      let start = last_applied.next_index();
+      let end = committed.next_index();
 
-        let st = self.log_store.get_log_state().await.sto_read_logs()?;
-        let mut last_purged_log_id = st.last_purged_log_id;
-        let mut last_log_id = st.last_log_id;
+      // If required logs are purged, it's an error - we can't recover
+      if start < last_purged_log_id.next_index() {
+        let err = C::err_from_string(format!(
+          "Cannot re-apply logs: need logs from index {}, but purged up to {}",
+          start,
+          last_purged_log_id.display()
+        ));
+        return Err(StorageError::read_log_at_index(start, err));
+      }
 
-        let (last_applied, _) = self.state_machine.applied_state().await.sto_read_sm()?;
+      log::info!(
+        "Re-applying committed logs to restore state machine to latest state: start: {}, end: {}",
+        start,
+        end
+      );
 
-        log::info!(
-            "get_initial_state: vote: {}, last_purged_log_id: {}, last_applied: {}, committed: {}, last_log_id: {}",
-            vote,
-            last_purged_log_id.display(),
-            last_applied.display(),
-            committed.display(),
-            last_log_id.display()
-        );
+      self.reapply_committed(start, end).await?;
 
-        // The stored log range is `(last_purged_log_id, last_log_id]`: an inversion means the
-        // log store is corrupted, e.g., by a snapshot inconsistent with the local logs.
-        if last_log_id < last_purged_log_id {
-            let err = C::err_from_string(format!(
-                "inverted log order in log store: last_log_id({}) < last_purged_log_id({}); the log store is corrupted",
-                last_log_id.display(),
-                last_purged_log_id.display(),
-            ));
-            return Err(StorageError::read_logs(err));
-        }
+      last_applied = committed.clone();
+    }
 
-        // TODO: It is possible `committed < last_applied` because when installing snapshot,
-        //       new committed should be saved, but not yet.
-        if committed < last_applied {
-            committed = last_applied.clone();
-        }
+    let mem_state = self.get_membership().await?;
 
-        // For transient state machines: install persistent snapshot to restore state efficiently.
-        self.restore_from_snapshot().await?;
-        let (mut last_applied, _) = self.state_machine.applied_state().await.sto_read_sm()?;
+    // Clean up dirty state: snapshot is installed, but logs are not cleaned.
+    if last_log_id < last_applied {
+      // A genuine hole means `last_applied` is strictly ahead by index. An equal index means
+      // the state machine and log store contain different entries in the same slot; a smaller
+      // applied index leaves a conflicting log tail that purging cannot remove.
+      if last_log_id.next_index() >= last_applied.next_index() {
+        let err = C::err_from_string(format!(
+          "inverted log order: last_applied({}) in the state machine is greater than last_log_id({}) in the log store but not at a greater index; the store is corrupted",
+          last_applied.display(),
+          last_log_id.display(),
+        ));
+        return Err(StorageError::read_logs(err));
+      }
 
-        // Re-apply log entries to recover SM to latest state.
-        // For transient state machines, this re-applies logs from snapshot position to committed.
-        if last_applied < committed {
-            let start = last_applied.next_index();
-            let end = committed.next_index();
+      log::info!(
+        "Clean the hole between last_log_id({}) and last_applied({}) by purging logs to {}",
+        last_log_id.display(),
+        last_applied.display(),
+        last_applied.display(),
+      );
 
-            // If required logs are purged, it's an error - we can't recover
-            if start < last_purged_log_id.next_index() {
-                let err = C::err_from_string(format!(
-                    "Cannot re-apply logs: need logs from index {}, but purged up to {}",
-                    start,
-                    last_purged_log_id.display()
-                ));
-                return Err(StorageError::read_log_at_index(start, err));
-            }
+      self
+        .log_store
+        .purge(last_applied.clone().unwrap())
+        .await
+        .sto_write_logs()?;
+      last_log_id = last_applied.clone();
+      last_purged_log_id = last_applied.clone();
+    }
 
-            log::info!(
-                "Re-applying committed logs to restore state machine to latest state: start: {}, end: {}",
-                start,
-                end
-            );
+    log::info!(
+      "load key log ids from ({},{}]",
+      last_purged_log_id.display(),
+      last_log_id.display()
+    );
 
-            self.reapply_committed(start, end).await?;
+    let log_id_list = self
+      .get_key_log_ids(last_purged_log_id.clone(), last_log_id.clone())
+      .await?;
 
-            last_applied = committed.clone();
-        }
+    let snapshot = self
+      .state_machine
+      .get_current_snapshot()
+      .await
+      .sto_read_snapshot(None)?;
 
-        let mem_state = self.get_membership().await?;
-
-        // Clean up dirty state: snapshot is installed, but logs are not cleaned.
-        if last_log_id < last_applied {
-            // A genuine hole means `last_applied` is strictly ahead by index. An equal index means
-            // the state machine and log store contain different entries in the same slot; a smaller
-            // applied index leaves a conflicting log tail that purging cannot remove.
-            if last_log_id.next_index() >= last_applied.next_index() {
-                let err = C::err_from_string(format!(
-                    "inverted log order: last_applied({}) in the state machine is greater than last_log_id({}) in the log store but not at a greater index; the store is corrupted",
-                    last_applied.display(),
-                    last_log_id.display(),
-                ));
-                return Err(StorageError::read_logs(err));
-            }
-
-            log::info!(
-                "Clean the hole between last_log_id({}) and last_applied({}) by purging logs to {}",
-                last_log_id.display(),
-                last_applied.display(),
-                last_applied.display(),
-            );
-
-            self.log_store
-                .purge(last_applied.clone().unwrap())
-                .await
-                .sto_write_logs()?;
-            last_log_id = last_applied.clone();
-            last_purged_log_id = last_applied.clone();
-        }
-
-        log::info!(
-            "load key log ids from ({},{}]",
-            last_purged_log_id.display(),
-            last_log_id.display()
-        );
-
-        let log_id_list = self
-            .get_key_log_ids(last_purged_log_id.clone(), last_log_id.clone())
-            .await?;
-
-        let snapshot = self
+    // If there is not a snapshot and there are logs purged, which means the snapshot is not persisted,
+    // we just rebuild it so that replication can use it.
+    let snapshot = match snapshot {
+      None => {
+        if last_purged_log_id.is_some() {
+          let mut b = self
             .state_machine
-            .get_current_snapshot()
+            .try_create_snapshot_builder(true)
             .await
-            .sto_read_snapshot(None)?;
-
-        // If there is not a snapshot and there are logs purged, which means the snapshot is not persisted,
-        // we just rebuild it so that replication can use it.
-        let snapshot = match snapshot {
-            None => {
-                if last_purged_log_id.is_some() {
-                    let mut b = self
-                        .state_machine
-                        .try_create_snapshot_builder(true)
-                        .await
-                        .unwrap();
-                    let s = b.build_snapshot().await.sto_write_snapshot(None)?;
-                    Some(s)
-                } else {
-                    None
-                }
-            }
-            s @ Some(_) => s,
-        };
-        let snapshot_meta = snapshot.map(|x| x.meta).unwrap_or_default();
-
-        let io_state = IOState::new(
-            &self.id_str,
-            &vote,
-            last_applied.clone(),
-            snapshot_meta.last_log_id.clone(),
-            last_purged_log_id.clone(),
-        );
-
-        let now = C::now();
-
-        Ok(RaftState {
-            // The initial value for `vote` is the minimal possible value.
-            // See: [Conditions for initialization][precondition]
-            //
-            // [precondition]: crate::docs::cluster_control::cluster_formation#preconditions-for-initialization
-            //
-            // TODO: If the lease reverted upon restart,
-            //       the lease based linearizable read consistency will be broken.
-            //       When lease based read is added, the restarted node must sleep for a while,
-            //       before serving.
-            vote: Leased::new(now, Duration::default(), vote),
-            log_ids: log_id_list,
-            membership_state: mem_state,
-            snapshot_meta,
-
-            // -- volatile fields: they are not persisted.
-            last_inflight_id: 0,
-            server_state: Default::default(),
-            io_state: Valid::new(io_state),
-            purge_upto: last_purged_log_id,
-            progress_id_gen: SharedIdGenerator::new(),
-        })
-    }
-
-    /// Restore state machine by installing snapshot if available and newer than last_applied.
-    ///
-    /// For transient state machines, this installs the last persistent snapshot to efficiently
-    /// restore the state machine to a recent position.
-    async fn restore_from_snapshot(&mut self) -> Result<(), StorageError<C>> {
-        let (last_applied, _) = self.state_machine.applied_state().await.sto_read_sm()?;
-        let snapshot = self
-            .state_machine
-            .get_current_snapshot()
-            .await
-            .sto_read_snapshot(None)?;
-
-        let Some(snap) = snapshot else {
-            return Ok(());
-        };
-
-        if snap.meta.last_log_id > last_applied {
-            log::info!(
-                "Installing snapshot to restore transient state machine: snapshot_last_log_id: {}, last_applied: {}",
-                snap.meta.last_log_id.display(),
-                last_applied.display()
-            );
-
-            self.state_machine
-                .install_snapshot(&snap.meta, snap.snapshot)
-                .await
-                .sto_write_snapshot(Some(snap.meta.signature()))?;
-
-            log::info!(
-                "Snapshot installed, state machine restored to snapshot position: new_last_applied: {}",
-                snap.meta.last_log_id.display()
-            );
-        }
-
-        Ok(())
-    }
-
-    /// Read log entries from [`RaftLogReader`] in chunks and apply them to the state machine.
-    pub(crate) async fn reapply_committed(
-        &mut self,
-        mut start: u64,
-        end: u64,
-    ) -> Result<(), StorageError<C>> {
-        let chunk_size = 64;
-
-        log::info!(
-            "re-apply log [{}..{}) in {} item chunks to state machine",
-            start,
-            end,
-            chunk_size,
-        );
-
-        let mut log_reader = self.log_store.get_log_reader().await;
-
-        while start < end {
-            let chunk_end = min(end, start + chunk_size);
-            let entries = log_reader
-                .try_get_log_entries(start..chunk_end)
-                .await
-                .sto_read_logs()?;
-
-            let first = entries.first().map(|ent| ent.index());
-            let last = entries.last().map(|ent| ent.index());
-
-            let make_err = || {
-                let err = C::err_from_string(format!(
-                    "Failed to get log entries, expected index: [{}, {}), got [{:?}, {:?})",
-                    start, chunk_end, first, last
-                ));
-
-                log::error!("{}", err);
-                err
-            };
-
-            if first != Some(start) {
-                return Err(StorageError::read_log_at_index(start, make_err()));
-            }
-            if last != Some(chunk_end - 1) {
-                return Err(StorageError::read_log_at_index(chunk_end - 1, make_err()));
-            }
-
-            log::info!(
-                "re-apply {} log entries: [{}, {}),",
-                chunk_end - start,
-                start,
-                chunk_end
-            );
-            let last_applied = entries.last().map(|e| e.log_id()).unwrap();
-            let apply_items = entries.into_iter().map(|entry| Ok((entry, None)));
-            let apply_stream = stream::iter(apply_items);
-            self.state_machine
-                .apply(apply_stream)
-                .await
-                .sto_apply(last_applied)?;
-
-            start = chunk_end;
-        }
-
-        Ok(())
-    }
-
-    /// Returns the last two membership configs found in log or state machine.
-    ///
-    /// A raft node needs to store at most 2 membership config logs:
-    /// - The first one must be committed, because raft allows proposing new membership only when
-    ///   the previous one is committed.
-    /// - The second may be committed or not.
-    ///
-    /// Because when handling append-entries RPC, (1) a raft follower will delete logs that are
-    /// inconsistent with the leader,
-    /// and (2) a membership will take effect at once it is written,
-    /// a follower needs to revert the effective membership to a previous one.
-    ///
-    /// And because (3) there is at most one outstanding, uncommitted membership log,
-    /// a follower only needs to revert at most one membership log.
-    ///
-    /// Thus, a raft node will only need to store at most two recent membership logs.
-    pub async fn get_membership(&mut self) -> Result<MembershipStateOf<C>, StorageError<C>> {
-        let (last_applied, sm_mem) = self.state_machine.applied_state().await.sto_read_sm()?;
-
-        let log_mem = self
-            .last_membership_in_log(last_applied.next_index())
-            .await?;
-        log::debug!(
-            "{}: membership_in_sm={:?}, membership_in_log={:?}",
-            func_name!(),
-            sm_mem,
-            log_mem
-        );
-
-        // There 2 membership configs in logs.
-        if log_mem.len() == 2 {
-            return Ok(MembershipStateOf::<C>::new(
-                Arc::new(log_mem[0].clone()),
-                Arc::new(log_mem[1].clone()),
-            ));
-        }
-
-        let effective = if log_mem.is_empty() {
-            sm_mem.clone()
+            .unwrap();
+          let s = b.build_snapshot().await.sto_write_snapshot(None)?;
+          Some(s)
         } else {
-            log_mem[0].clone()
-        };
-
-        let res = MembershipStateOf::<C>::new(Arc::new(sm_mem), Arc::new(effective));
-
-        Ok(res)
-    }
-
-    /// Get the last 2 membership configs found in the log.
-    ///
-    /// This method returns at most membership logs with the greatest log index which is
-    /// `>=since_index`. If no such membership log is found, it returns `None`, e.g., when logs
-    /// are cleaned after being applied.
-    pub async fn last_membership_in_log(
-        &mut self,
-        since_index: u64,
-    ) -> Result<Vec<StoredMembershipOf<C>>, StorageError<C>> {
-        let st = self.log_store.get_log_state().await.sto_read_logs()?;
-
-        let mut end = st.last_log_id.next_index();
-
-        log::info!("load membership from log: [{}..{})", since_index, end);
-
-        let start = max(st.last_purged_log_id.next_index(), since_index);
-        let step = 64;
-
-        let mut res = vec![];
-        let mut log_reader = self.log_store.get_log_reader().await;
-
-        while start < end {
-            let step_start = max(start, end.saturating_sub(step));
-            let entries = log_reader
-                .try_get_log_entries(step_start..end)
-                .await
-                .sto_read_logs()?;
-
-            for ent in entries.iter().rev() {
-                if let Some(mem) = ent.get_membership() {
-                    let em = StoredMembershipOf::<C>::new(Some(ent.log_id()), mem);
-                    res.insert(0, em);
-                    if res.len() == 2 {
-                        return Ok(res);
-                    }
-                }
-            }
-
-            end = end.saturating_sub(step);
+          None
         }
+      }
+      s @ Some(_) => s,
+    };
+    let snapshot_meta = snapshot.map(|x| x.meta).unwrap_or_default();
 
-        Ok(res)
+    let io_state = IOState::new(
+      &self.id_str,
+      &vote,
+      last_applied.clone(),
+      snapshot_meta.last_log_id.clone(),
+      last_purged_log_id.clone(),
+    );
+
+    let now = C::now();
+
+    Ok(RaftState {
+      // The initial value for `vote` is the minimal possible value.
+      // See: [Conditions for initialization][precondition]
+      //
+      // [precondition]: crate::docs::cluster_control::cluster_formation#preconditions-for-initialization
+      //
+      // TODO: If the lease reverted upon restart,
+      //       the lease based linearizable read consistency will be broken.
+      //       When lease based read is added, the restarted node must sleep for a while,
+      //       before serving.
+      vote: Leased::new(now, Duration::default(), vote),
+      log_ids: log_id_list,
+      membership_state: mem_state,
+      snapshot_meta,
+
+      // -- volatile fields: they are not persisted.
+      last_inflight_id: 0,
+      server_state: Default::default(),
+      io_state: Valid::new(io_state),
+      purge_upto: last_purged_log_id,
+      progress_id_gen: SharedIdGenerator::new(),
+    })
+  }
+
+  /// Restore state machine by installing snapshot if available and newer than last_applied.
+  ///
+  /// For transient state machines, this installs the last persistent snapshot to efficiently
+  /// restore the state machine to a recent position.
+  async fn restore_from_snapshot(&mut self) -> Result<(), StorageError<C>> {
+    let (last_applied, _) = self.state_machine.applied_state().await.sto_read_sm()?;
+    let snapshot = self
+      .state_machine
+      .get_current_snapshot()
+      .await
+      .sto_read_snapshot(None)?;
+
+    let Some(snap) = snapshot else {
+      return Ok(());
+    };
+
+    if snap.meta.last_log_id > last_applied {
+      log::info!(
+        "Installing snapshot to restore transient state machine: snapshot_last_log_id: {}, last_applied: {}",
+        snap.meta.last_log_id.display(),
+        last_applied.display()
+      );
+
+      self
+        .state_machine
+        .install_snapshot(&snap.meta, snap.snapshot)
+        .await
+        .sto_write_snapshot(Some(snap.meta.signature()))?;
+
+      log::info!(
+        "Snapshot installed, state machine restored to snapshot position: new_last_applied: {}",
+        snap.meta.last_log_id.display()
+      );
     }
 
-    // TODO: store purged: Option<LogId> separately.
-    /// Get key-log-ids from the log store.
-    ///
-    /// Key-log-ids are the last log id of each Leader.
-    async fn get_key_log_ids(
-        &mut self,
-        purged: Option<LogIdOf<C>>,
-        last: Option<LogIdOf<C>>,
-    ) -> Result<LogIdList<CommittedLeaderIdOf<C>>, StorageError<C>> {
-        let mut log_reader = self.log_store.get_log_reader().await;
+    Ok(())
+  }
 
-        let last = match last {
-            None => return Ok(LogIdList::new(purged, vec![])),
-            Some(x) => x,
-        };
+  /// Read log entries from [`RaftLogReader`] in chunks and apply them to the state machine.
+  pub(crate) async fn reapply_committed(
+    &mut self,
+    mut start: u64,
+    end: u64,
+  ) -> Result<(), StorageError<C>> {
+    let chunk_size = 64;
 
-        if purged.index() == Some(last.index()) {
-            // All logs are purged, no key_log_ids
-            return Ok(LogIdList::new(Some(last), vec![]));
+    log::info!(
+      "re-apply log [{}..{}) in {} item chunks to state machine",
+      start,
+      end,
+      chunk_size,
+    );
+
+    let mut log_reader = self.log_store.get_log_reader().await;
+
+    while start < end {
+      let chunk_end = min(end, start + chunk_size);
+      let entries = log_reader
+        .try_get_log_entries(start..chunk_end)
+        .await
+        .sto_read_logs()?;
+
+      let first = entries.first().map(|ent| ent.index());
+      let last = entries.last().map(|ent| ent.index());
+
+      let make_err = || {
+        let err = C::err_from_string(format!(
+          "Failed to get log entries, expected index: [{}, {}), got [{:?}, {:?})",
+          start, chunk_end, first, last
+        ));
+
+        log::error!("{}", err);
+        err
+      };
+
+      if first != Some(start) {
+        return Err(StorageError::read_log_at_index(start, make_err()));
+      }
+      if last != Some(chunk_end - 1) {
+        return Err(StorageError::read_log_at_index(chunk_end - 1, make_err()));
+      }
+
+      log::info!(
+        "re-apply {} log entries: [{}, {}),",
+        chunk_end - start,
+        start,
+        chunk_end
+      );
+      let last_applied = entries.last().map(|e| e.log_id()).unwrap();
+      let apply_items = entries.into_iter().map(|entry| Ok((entry, None)));
+      let apply_stream = stream::iter(apply_items);
+      self
+        .state_machine
+        .apply(apply_stream)
+        .await
+        .sto_apply(last_applied)?;
+
+      start = chunk_end;
+    }
+
+    Ok(())
+  }
+
+  /// Returns the last two membership configs found in log or state machine.
+  ///
+  /// A raft node needs to store at most 2 membership config logs:
+  /// - The first one must be committed, because raft allows proposing new membership only when
+  ///   the previous one is committed.
+  /// - The second may be committed or not.
+  ///
+  /// Because when handling append-entries RPC, (1) a raft follower will delete logs that are
+  /// inconsistent with the leader,
+  /// and (2) a membership will take effect at once it is written,
+  /// a follower needs to revert the effective membership to a previous one.
+  ///
+  /// And because (3) there is at most one outstanding, uncommitted membership log,
+  /// a follower only needs to revert at most one membership log.
+  ///
+  /// Thus, a raft node will only need to store at most two recent membership logs.
+  pub async fn get_membership(&mut self) -> Result<MembershipStateOf<C>, StorageError<C>> {
+    let (last_applied, sm_mem) = self.state_machine.applied_state().await.sto_read_sm()?;
+
+    let log_mem = self
+      .last_membership_in_log(last_applied.next_index())
+      .await?;
+    log::debug!(
+      "{}: membership_in_sm={:?}, membership_in_log={:?}",
+      func_name!(),
+      sm_mem,
+      log_mem
+    );
+
+    // There 2 membership configs in logs.
+    if log_mem.len() == 2 {
+      return Ok(MembershipStateOf::<C>::new(
+        Arc::new(log_mem[0].clone()),
+        Arc::new(log_mem[1].clone()),
+      ));
+    }
+
+    let effective = if log_mem.is_empty() {
+      sm_mem.clone()
+    } else {
+      log_mem[0].clone()
+    };
+
+    let res = MembershipStateOf::<C>::new(Arc::new(sm_mem), Arc::new(effective));
+
+    Ok(res)
+  }
+
+  /// Get the last 2 membership configs found in the log.
+  ///
+  /// This method returns at most membership logs with the greatest log index which is
+  /// `>=since_index`. If no such membership log is found, it returns `None`, e.g., when logs
+  /// are cleaned after being applied.
+  pub async fn last_membership_in_log(
+    &mut self,
+    since_index: u64,
+  ) -> Result<Vec<StoredMembershipOf<C>>, StorageError<C>> {
+    let st = self.log_store.get_log_state().await.sto_read_logs()?;
+
+    let mut end = st.last_log_id.next_index();
+
+    log::info!("load membership from log: [{}..{})", since_index, end);
+
+    let start = max(st.last_purged_log_id.next_index(), since_index);
+    let step = 64;
+
+    let mut res = vec![];
+    let mut log_reader = self.log_store.get_log_reader().await;
+
+    while start < end {
+      let step_start = max(start, end.saturating_sub(step));
+      let entries = log_reader
+        .try_get_log_entries(step_start..end)
+        .await
+        .sto_read_logs()?;
+
+      for ent in entries.iter().rev() {
+        if let Some(mem) = ent.get_membership() {
+          let em = StoredMembershipOf::<C>::new(Some(ent.log_id()), mem);
+          res.insert(0, em);
+          if res.len() == 2 {
+            return Ok(res);
+          }
         }
+      }
 
-        let first = log_reader.get_log_id(purged.next_index()).await?;
-
-        let log_ids = log_reader
-            .get_key_log_ids(first..=last)
-            .await
-            .sto_read_logs()?;
-
-        Ok(LogIdList::new(purged, log_ids))
+      end = end.saturating_sub(step);
     }
+
+    Ok(res)
+  }
+
+  // TODO: store purged: Option<LogId> separately.
+  /// Get key-log-ids from the log store.
+  ///
+  /// Key-log-ids are the last log id of each Leader.
+  async fn get_key_log_ids(
+    &mut self,
+    purged: Option<LogIdOf<C>>,
+    last: Option<LogIdOf<C>>,
+  ) -> Result<LogIdList<CommittedLeaderIdOf<C>>, StorageError<C>> {
+    let mut log_reader = self.log_store.get_log_reader().await;
+
+    let last = match last {
+      None => return Ok(LogIdList::new(purged, vec![])),
+      Some(x) => x,
+    };
+
+    if purged.index() == Some(last.index()) {
+      // All logs are purged, no key_log_ids
+      return Ok(LogIdList::new(Some(last), vec![]));
+    }
+
+    let first = log_reader.get_log_id(purged.next_index()).await?;
+
+    let log_ids = log_reader
+      .get_key_log_ids(first..=last)
+      .await
+      .sto_read_logs()?;
+
+    Ok(LogIdList::new(purged, log_ids))
+  }
 }

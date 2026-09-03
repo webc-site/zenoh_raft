@@ -8,12 +8,12 @@
 //! maintaining the invariants described in
 //! [issue #1723](https://github.com/databendlabs/openraft/issues/1723).
 
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::time::Duration;
+use std::{
+  sync::{Arc, Mutex},
+  time::Duration,
+};
 
-use crate::network::Backoff;
-use crate::replication::EXHAUSTED_BACKOFF_DELAY;
+use crate::{network::Backoff, replication::EXHAUSTED_BACKOFF_DELAY};
 
 /// Read-only handle to the backoff shared with the request-stream generator.
 ///
@@ -22,51 +22,49 @@ use crate::replication::EXHAUSTED_BACKOFF_DELAY;
 /// [`BackoffState::consumer`](crate::replication::backoff_state::BackoffState::consumer).
 #[derive(Clone)]
 pub(crate) struct BackoffConsumer {
-    pub(crate) inner: Arc<Mutex<Option<Backoff>>>,
+  pub(crate) inner: Arc<Mutex<Option<Backoff>>>,
 }
 
 impl BackoffConsumer {
-    /// Returns the next delay to wait before emitting the next request, or `None`
-    /// if backoff is not currently enabled. Advances the iterator when enabled.
-    pub(crate) fn next_delay(&self) -> Option<Duration> {
-        let mut guard = self.inner.lock().unwrap();
-        let backoff = guard.as_mut()?;
-        Some(backoff.next().unwrap_or(EXHAUSTED_BACKOFF_DELAY))
-    }
+  /// Returns the next delay to wait before emitting the next request, or `None`
+  /// if backoff is not currently enabled. Advances the iterator when enabled.
+  pub(crate) fn next_delay(&self) -> Option<Duration> {
+    let mut guard = self.inner.lock().unwrap();
+    let backoff = guard.as_mut()?;
+    Some(backoff.next().unwrap_or(EXHAUSTED_BACKOFF_DELAY))
+  }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::iter::repeat;
-    use std::time::Duration;
+  use std::{iter::repeat, time::Duration};
 
-    use crate::network::Backoff;
-    use crate::replication::backoff_state::BackoffState;
+  use crate::{network::Backoff, replication::backoff_state::BackoffState};
 
-    fn constant_200ms_backoff() -> Backoff {
-        Backoff::new(repeat(Duration::from_millis(200)))
-    }
+  fn constant_200ms_backoff() -> Backoff {
+    Backoff::new(repeat(Duration::from_millis(200)))
+  }
 
-    /// The consumer yields a delay only while backoff is enabled on the owning
-    /// `BackoffState`, and returns `None` once the state clears it.
-    #[test]
-    fn samples_delay_only_when_enabled() {
-        let mut state = BackoffState::new();
-        let consumer = state.consumer();
+  /// The consumer yields a delay only while backoff is enabled on the owning
+  /// `BackoffState`, and returns `None` once the state clears it.
+  #[test]
+  fn samples_delay_only_when_enabled() {
+    let mut state = BackoffState::new();
+    let consumer = state.consumer();
 
-        assert_eq!(consumer.next_delay(), None, "disabled: no delay");
+    assert_eq!(consumer.next_delay(), None, "disabled: no delay");
 
-        state.on_error(100);
-        state.reconcile(constant_200ms_backoff);
+    state.on_error(100);
+    state.reconcile(constant_200ms_backoff);
 
-        assert_eq!(
-            consumer.next_delay(),
-            Some(Duration::from_millis(200)),
-            "enabled: yields configured delay"
-        );
+    assert_eq!(
+      consumer.next_delay(),
+      Some(Duration::from_millis(200)),
+      "enabled: yields configured delay"
+    );
 
-        state.on_success();
+    state.on_success();
 
-        assert_eq!(consumer.next_delay(), None, "after success: no delay");
-    }
+    assert_eq!(consumer.next_delay(), None, "after success: no delay");
+  }
 }

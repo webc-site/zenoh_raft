@@ -1,37 +1,31 @@
-use std::cmp::Ordering;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{cmp::Ordering, sync::Arc, time::Duration};
 
 use display_more::DisplayOptionExt;
 use futures_util::Stream;
 
-use crate::OptionalSend;
-use crate::RaftTypeConfig;
-use crate::async_runtime::{MpscSender, MpscWeakSender};
-use crate::core::io_flush_tracking::FlushPoint;
-use crate::core::raft_msg::RaftMsg;
-use crate::core::raft_msg::install_full_snapshot_request::InstallFullSnapshotRequest;
-use crate::core::sm;
-use crate::errors::Fatal;
 #[cfg(doc)]
 use crate::errors::into_raft_result::IntoRaftResult;
-use crate::raft::AppendEntriesRequest;
-use crate::raft::AppendEntriesResponse;
-use crate::raft::SnapshotResponse;
-use crate::raft::TransferLeaderError;
-use crate::raft::TransferLeaderRequest;
-use crate::raft::TransferLeaderResponse;
-use crate::raft::VoteRequest;
-use crate::raft::VoteResponse;
-use crate::raft::raft_inner::RaftInner;
-use crate::raft::stream_append;
-use crate::raft::stream_append::StreamAppendResult;
-use crate::storage::RaftStateMachine;
-use crate::type_config::TypeConfigExt;
-use crate::type_config::alias::SmSnapshotOf;
-use crate::type_config::alias::VoteOf;
-use crate::vote::RaftVote;
-use crate::vote::raft_vote::RaftVoteExt;
+use crate::{
+  OptionalSend, RaftTypeConfig,
+  async_runtime::{MpscSender, MpscWeakSender},
+  core::{
+    io_flush_tracking::FlushPoint,
+    raft_msg::{RaftMsg, install_full_snapshot_request::InstallFullSnapshotRequest},
+    sm,
+  },
+  errors::Fatal,
+  raft::{
+    AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, TransferLeaderError,
+    TransferLeaderRequest, TransferLeaderResponse, VoteRequest, VoteResponse,
+    raft_inner::RaftInner, stream_append, stream_append::StreamAppendResult,
+  },
+  storage::RaftStateMachine,
+  type_config::{
+    TypeConfigExt,
+    alias::{SmSnapshotOf, VoteOf},
+  },
+  vote::{RaftVote, raft_vote::RaftVoteExt},
+};
 
 /// Handles Raft protocol requests from other nodes in the cluster.
 ///
@@ -66,256 +60,259 @@ use crate::vote::raft_vote::RaftVoteExt;
 /// ```
 pub struct ProtocolApi<C, SM>
 where
-    C: RaftTypeConfig,
-    SM: RaftStateMachine<C>,
+  C: RaftTypeConfig,
+  SM: RaftStateMachine<C>,
 {
-    inner: Arc<RaftInner<C>>,
+  inner: Arc<RaftInner<C>>,
 
-    /// Sender to the state machine worker, for requests that RaftCore just forwards.
-    sm_cmd_tx: MpscWeakSender<sm::Command<C, SM>>,
+  /// Sender to the state machine worker, for requests that RaftCore just forwards.
+  sm_cmd_tx: MpscWeakSender<sm::Command<C, SM>>,
 
-    /// Sender of the dedicated channel that delivers a full snapshot to RaftCore.
-    ///
-    /// The snapshot data type is defined by the state machine, thus it does not go through
-    /// the [`RaftMsg`] channel, which is independent of the state machine type.
-    install_snapshot_tx: MpscSender<InstallFullSnapshotRequest<C, SM>>,
+  /// Sender of the dedicated channel that delivers a full snapshot to RaftCore.
+  ///
+  /// The snapshot data type is defined by the state machine, thus it does not go through
+  /// the [`RaftMsg`] channel, which is independent of the state machine type.
+  install_snapshot_tx: MpscSender<InstallFullSnapshotRequest<C, SM>>,
 }
 
 impl<C, SM> ProtocolApi<C, SM>
 where
-    C: RaftTypeConfig,
-    SM: RaftStateMachine<C>,
+  C: RaftTypeConfig,
+  SM: RaftStateMachine<C>,
 {
-    pub(in crate::raft) fn new(
-        inner: Arc<RaftInner<C>>,
-        sm_cmd_tx: MpscWeakSender<sm::Command<C, SM>>,
-        install_snapshot_tx: MpscSender<InstallFullSnapshotRequest<C, SM>>,
-    ) -> Self {
-        Self {
-            inner,
-            sm_cmd_tx,
-            install_snapshot_tx,
-        }
+  pub(in crate::raft) fn new(
+    inner: Arc<RaftInner<C>>,
+    sm_cmd_tx: MpscWeakSender<sm::Command<C, SM>>,
+    install_snapshot_tx: MpscSender<InstallFullSnapshotRequest<C, SM>>,
+  ) -> Self {
+    Self {
+      inner,
+      sm_cmd_tx,
+      install_snapshot_tx,
+    }
+  }
+
+  /// Send a command to the state machine worker directly, without going through RaftCore.
+  async fn send_sm_command(&self, cmd: sm::Command<C, SM>) -> Result<(), Fatal<C>> {
+    // The state machine worker, not RaftCore, owns the receiving end of this channel: it can
+    // die on its own (e.g. a panic in a state machine method) while RaftCore keeps running.
+    // Resolve the stop cause via the bounded variant so a dead worker can't hang this call.
+    let Some(tx) = MpscWeakSender::<sm::Command<C, SM>>::upgrade(&self.sm_cmd_tx) else {
+      return Err(self.inner.get_core_stop_error_bounded().await);
+    };
+
+    let send_res = tx.send(cmd).await;
+    if send_res.is_err() {
+      return Err(self.inner.get_core_stop_error_bounded().await);
+    }
+    Ok(())
+  }
+
+  pub async fn vote(&self, rpc: VoteRequest<C>) -> Result<VoteResponse<C>, Fatal<C>> {
+    log::info!("Raft::vote(): rpc: {rpc}");
+
+    self
+      .inner
+      .call_core_oneshot(|tx| RaftMsg::RequestVote { rpc, tx })
+      .await
+  }
+
+  pub async fn pre_vote(&self, rpc: VoteRequest<C>) -> Result<VoteResponse<C>, Fatal<C>> {
+    log::info!("Raft::pre_vote(): rpc: {rpc}");
+
+    self
+      .inner
+      .call_core_oneshot(|tx| RaftMsg::RequestPreVote { rpc, tx })
+      .await
+  }
+
+  pub async fn append_entries(
+    &self,
+    rpc: AppendEntriesRequest<C>,
+  ) -> Result<AppendEntriesResponse<C>, Fatal<C>> {
+    log::debug!("Raft::append_entries: rpc: {rpc}");
+
+    let stream_result: StreamAppendResult<C> = self
+      .inner
+      .call_core_oneshot(|tx| RaftMsg::AppendEntries { rpc, tx })
+      .await?;
+    Ok(AppendEntriesResponse::from(stream_result))
+  }
+
+  pub fn stream_append<S>(
+    self,
+    stream: S,
+  ) -> impl Stream<Item = Result<StreamAppendResult<C>, Fatal<C>>> + OptionalSend + 'static
+  where
+    S: Stream<Item = AppendEntriesRequest<C>> + OptionalSend + 'static,
+  {
+    stream_append::stream_append(self.inner, stream)
+  }
+
+  pub async fn get_snapshot(&self) -> Result<Option<SmSnapshotOf<C, SM>>, Fatal<C>> {
+    log::debug!("Raft::get_snapshot()");
+
+    let (tx, rx) = C::oneshot();
+    self
+      .send_sm_command(sm::Command::<C, SM>::get_snapshot(tx))
+      .await?;
+    self.inner.recv_msg(rx).await
+  }
+
+  pub async fn install_full_snapshot(
+    &self,
+    vote: VoteOf<C>,
+    snapshot: SmSnapshotOf<C, SM>,
+  ) -> Result<SnapshotResponse<C>, Fatal<C>> {
+    log::info!("Raft::install_full_snapshot()");
+
+    let (tx, rx) = C::oneshot();
+    let req = InstallFullSnapshotRequest::<C, SM> { vote, snapshot, tx };
+
+    let send_res = self.install_snapshot_tx.send(req).await;
+    if send_res.is_err() {
+      return Err(self.inner.get_core_stop_error().await);
     }
 
-    /// Send a command to the state machine worker directly, without going through RaftCore.
-    async fn send_sm_command(&self, cmd: sm::Command<C, SM>) -> Result<(), Fatal<C>> {
-        // The state machine worker, not RaftCore, owns the receiving end of this channel: it can
-        // die on its own (e.g. a panic in a state machine method) while RaftCore keeps running.
-        // Resolve the stop cause via the bounded variant so a dead worker can't hang this call.
-        let Some(tx) = MpscWeakSender::<sm::Command<C, SM>>::upgrade(&self.sm_cmd_tx) else {
-            return Err(self.inner.get_core_stop_error_bounded().await);
-        };
+    self.inner.recv_msg(rx).await
+  }
 
-        let send_res = tx.send(cmd).await;
-        if send_res.is_err() {
-            return Err(self.inner.get_core_stop_error_bounded().await);
-        }
-        Ok(())
-    }
-
-    pub async fn vote(&self, rpc: VoteRequest<C>) -> Result<VoteResponse<C>, Fatal<C>> {
-        log::info!("Raft::vote(): rpc: {rpc}");
-
-        self.inner
-            .call_core_oneshot(|tx| RaftMsg::RequestVote { rpc, tx })
-            .await
-    }
-
-    pub async fn pre_vote(&self, rpc: VoteRequest<C>) -> Result<VoteResponse<C>, Fatal<C>> {
-        log::info!("Raft::pre_vote(): rpc: {rpc}");
-
-        self.inner
-            .call_core_oneshot(|tx| RaftMsg::RequestPreVote { rpc, tx })
-            .await
-    }
-
-    pub async fn append_entries(
-        &self,
-        rpc: AppendEntriesRequest<C>,
-    ) -> Result<AppendEntriesResponse<C>, Fatal<C>> {
-        log::debug!("Raft::append_entries: rpc: {rpc}");
-
-        let stream_result: StreamAppendResult<C> = self
-            .inner
-            .call_core_oneshot(|tx| RaftMsg::AppendEntries { rpc, tx })
-            .await?;
-        Ok(AppendEntriesResponse::from(stream_result))
-    }
-
-    pub fn stream_append<S>(
-        self,
-        stream: S,
-    ) -> impl Stream<Item = Result<StreamAppendResult<C>, Fatal<C>>> + OptionalSend + 'static
-    where
-        S: Stream<Item = AppendEntriesRequest<C>> + OptionalSend + 'static,
+  pub async fn handle_transfer_leader(
+    &self,
+    req: TransferLeaderRequest<C>,
+  ) -> Result<TransferLeaderResponse<C>, Fatal<C>> {
+    // Reset the Leader lease at once and quit if this is not the assigned next leader.
+    // Only the assigned next Leader waits for the log to be flushed.
+    if &req.to_node_id == self.inner.id()
+      && let Err(err) =
+        ProtocolApi::<C, SM>::ensure_log_flushed_for_transfer_leader(self, &req).await?
     {
-        stream_append::stream_append(self.inner, stream)
+      return Ok(Err(err));
     }
 
-    pub async fn get_snapshot(&self) -> Result<Option<SmSnapshotOf<C, SM>>, Fatal<C>> {
-        log::debug!("Raft::get_snapshot()");
+    let raft_msg = RaftMsg::HandleTransferLeader {
+      from: req.from_leader.clone(),
+      to: req.to_node_id.clone(),
+      last_log_id: req.last_log_id.clone(),
+    };
 
-        let (tx, rx) = C::oneshot();
-        self.send_sm_command(sm::Command::<C, SM>::get_snapshot(tx))
-            .await?;
-        self.inner.recv_msg(rx).await
+    self.inner.send_msg(raft_msg).await?;
+
+    Ok(Ok(()))
+  }
+
+  fn check_transfer_leader_progress(
+    req: &TransferLeaderRequest<C>,
+    progress: &Option<FlushPoint<C>>,
+  ) -> TransferLeaderResponse<C> {
+    let progress = if let Some(progress) = progress {
+      progress
+    } else {
+      return Err(TransferLeaderError::LogNotFlushed {
+        expected: req.last_log_id.clone(),
+        actual: None,
+      });
+    };
+
+    let actual_vote = progress.vote.as_ref_vote();
+
+    let vote_matches = actual_vote == req.from_leader.as_ref_vote();
+    let log_is_flushed = progress.last_log_id.as_ref() >= req.last_log_id.as_ref();
+
+    if vote_matches && log_is_flushed {
+      return Ok(());
     }
 
-    pub async fn install_full_snapshot(
-        &self,
-        vote: VoteOf<C>,
-        snapshot: SmSnapshotOf<C, SM>,
-    ) -> Result<SnapshotResponse<C>, Fatal<C>> {
-        log::info!("Raft::install_full_snapshot()");
+    let vote_changed = !matches!(
+      req.from_leader.as_ref_vote().partial_cmp(&actual_vote),
+      Some(Ordering::Greater | Ordering::Equal)
+    );
+    if vote_changed {
+      let actual_vote = VoteOf::<C>::from_leader_id(
+        progress.vote.leader_id().clone(),
+        progress.vote.is_committed(),
+      );
 
-        let (tx, rx) = C::oneshot();
-        let req = InstallFullSnapshotRequest::<C, SM> { vote, snapshot, tx };
-
-        let send_res = self.install_snapshot_tx.send(req).await;
-        if send_res.is_err() {
-            return Err(self.inner.get_core_stop_error().await);
-        }
-
-        self.inner.recv_msg(rx).await
+      return Err(TransferLeaderError::VoteChanged {
+        expected: req.from_leader.clone(),
+        actual: actual_vote,
+      });
     }
 
-    pub async fn handle_transfer_leader(
-        &self,
-        req: TransferLeaderRequest<C>,
-    ) -> Result<TransferLeaderResponse<C>, Fatal<C>> {
-        // Reset the Leader lease at once and quit if this is not the assigned next leader.
-        // Only the assigned next Leader waits for the log to be flushed.
-        if &req.to_node_id == self.inner.id()
-            && let Err(err) =
-                ProtocolApi::<C, SM>::ensure_log_flushed_for_transfer_leader(self, &req).await?
-        {
-            return Ok(Err(err));
-        }
+    Err(TransferLeaderError::LogNotFlushed {
+      expected: req.last_log_id.clone(),
+      actual: progress.last_log_id.clone(),
+    })
+  }
 
-        let raft_msg = RaftMsg::HandleTransferLeader {
-            from: req.from_leader.clone(),
-            to: req.to_node_id.clone(),
-            last_log_id: req.last_log_id.clone(),
-        };
-
-        self.inner.send_msg(raft_msg).await?;
-
-        Ok(Ok(()))
-    }
-
-    fn check_transfer_leader_progress(
-        req: &TransferLeaderRequest<C>,
-        progress: &Option<FlushPoint<C>>,
-    ) -> TransferLeaderResponse<C> {
-        let progress = if let Some(progress) = progress {
-            progress
-        } else {
-            return Err(TransferLeaderError::LogNotFlushed {
-                expected: req.last_log_id.clone(),
-                actual: None,
-            });
-        };
-
-        let actual_vote = progress.vote.as_ref_vote();
-
-        let vote_matches = actual_vote == req.from_leader.as_ref_vote();
-        let log_is_flushed = progress.last_log_id.as_ref() >= req.last_log_id.as_ref();
-
-        if vote_matches && log_is_flushed {
-            return Ok(());
-        }
-
-        let vote_changed = !matches!(
-            req.from_leader.as_ref_vote().partial_cmp(&actual_vote),
-            Some(Ordering::Greater | Ordering::Equal)
-        );
-        if vote_changed {
-            let actual_vote = VoteOf::<C>::from_leader_id(
-                progress.vote.leader_id().clone(),
-                progress.vote.is_committed(),
-            );
-
-            return Err(TransferLeaderError::VoteChanged {
-                expected: req.from_leader.clone(),
-                actual: actual_vote,
-            });
-        }
-
-        Err(TransferLeaderError::LogNotFlushed {
-            expected: req.last_log_id.clone(),
-            actual: progress.last_log_id.clone(),
-        })
-    }
-
-    fn log_transfer_leader_progress(
-        req: &TransferLeaderRequest<C>,
-        progress: &Option<FlushPoint<C>>,
-        res: &TransferLeaderResponse<C>,
-    ) {
-        match res {
-            Ok(()) => {
-                log::info!(
-                    "Leader-transfer condition satisfied, submit Leader-transfer message; \
+  fn log_transfer_leader_progress(
+    req: &TransferLeaderRequest<C>,
+    progress: &Option<FlushPoint<C>>,
+    res: &TransferLeaderResponse<C>,
+  ) {
+    match res {
+      Ok(()) => {
+        log::info!(
+          "Leader-transfer condition satisfied, submit Leader-transfer message; \
                      expected: (vote: {}, flushed_log: {})",
-                    req.from_leader,
-                    req.last_log_id.display(),
-                );
-            }
-            Err(TransferLeaderError::VoteChanged { .. }) => {
-                log::warn!(
-                    "Vote changed, give up Leader-transfer; expected vote: {}, progress: {}",
-                    req.from_leader,
-                    progress.display()
-                );
-            }
-            Err(_) => {
-                log::warn!(
-                    "Leader-transfer condition failed, reject Leader-transfer; \
+          req.from_leader,
+          req.last_log_id.display(),
+        );
+      }
+      Err(TransferLeaderError::VoteChanged { .. }) => {
+        log::warn!(
+          "Vote changed, give up Leader-transfer; expected vote: {}, progress: {}",
+          req.from_leader,
+          progress.display()
+        );
+      }
+      Err(_) => {
+        log::warn!(
+          "Leader-transfer condition failed, reject Leader-transfer; \
                      expected: (vote: {}; flushed_log: {}), progress: {}",
-                    req.from_leader,
-                    req.last_log_id.display(),
-                    progress.display()
-                );
-            }
-        }
+          req.from_leader,
+          req.last_log_id.display(),
+          progress.display()
+        );
+      }
     }
+  }
 
-    /// Wait for the log to be flushed to make sure the RequestVote.last_log_id is up to date, then
-    /// TransferLeader will be able to proceed.
-    async fn ensure_log_flushed_for_transfer_leader(
-        &self,
-        req: &TransferLeaderRequest<C>,
-    ) -> Result<TransferLeaderResponse<C>, Fatal<C>> {
-        // If the next Leader is this node, wait for the log to be flushed to make sure the
-        // RequestVote.last_log_id is up to date.
+  /// Wait for the log to be flushed to make sure the RequestVote.last_log_id is up to date, then
+  /// TransferLeader will be able to proceed.
+  async fn ensure_log_flushed_for_transfer_leader(
+    &self,
+    req: &TransferLeaderRequest<C>,
+  ) -> Result<TransferLeaderResponse<C>, Fatal<C>> {
+    // If the next Leader is this node, wait for the log to be flushed to make sure the
+    // RequestVote.last_log_id is up to date.
 
-        let timeout_at = C::now() + Duration::from_millis(self.inner.config().election_timeout_min);
-        let mut log_progress = self.inner.progress_watcher.log_progress();
+    let timeout_at = C::now() + Duration::from_millis(self.inner.config().election_timeout_min);
+    let mut log_progress = self.inner.progress_watcher.log_progress();
 
-        loop {
-            let progress = log_progress.get();
-            let res = Self::check_transfer_leader_progress(req, &progress);
+    loop {
+      let progress = log_progress.get();
+      let res = Self::check_transfer_leader_progress(req, &progress);
 
-            if let Ok(()) | Err(TransferLeaderError::VoteChanged { .. }) = &res {
-                Self::log_transfer_leader_progress(req, &progress, &res);
-                return Ok(res);
-            }
+      if let Ok(()) | Err(TransferLeaderError::VoteChanged { .. }) = &res {
+        Self::log_transfer_leader_progress(req, &progress, &res);
+        return Ok(res);
+      }
 
-            let changed_res = C::timeout_at(timeout_at, log_progress.changed()).await;
-            let changed_res = match changed_res {
-                Ok(changed_res) => changed_res,
-                Err(_) => {
-                    let progress = log_progress.get();
-                    let res = Self::check_transfer_leader_progress(req, &progress);
-                    Self::log_transfer_leader_progress(req, &progress, &res);
-                    return Ok(res);
-                }
-            };
-
-            if changed_res.is_err() {
-                return Err(self.inner.get_core_stop_error().await);
-            }
+      let changed_res = C::timeout_at(timeout_at, log_progress.changed()).await;
+      let changed_res = match changed_res {
+        Ok(changed_res) => changed_res,
+        Err(_) => {
+          let progress = log_progress.get();
+          let res = Self::check_transfer_leader_progress(req, &progress);
+          Self::log_transfer_leader_progress(req, &progress, &res);
+          return Ok(res);
         }
+      };
+
+      if changed_res.is_err() {
+        return Err(self.inner.get_core_stop_error().await);
+      }
     }
+  }
 }

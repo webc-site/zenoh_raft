@@ -1,9 +1,8 @@
-use crate::errors::ChangeMembershipError;
-use crate::errors::EmptyMembership;
-use crate::errors::LearnerNotFound;
-use crate::errors::NodeNotFound;
-use crate::node::NodeId;
-use crate::vote::RaftCommittedLeaderId;
+use crate::{
+  errors::{ChangeMembershipError, EmptyMembership, LearnerNotFound, NodeNotFound},
+  node::NodeId,
+  vote::RaftCommittedLeaderId,
+};
 
 /// Errors occur when building a [`Membership`].
 ///
@@ -11,15 +10,15 @@ use crate::vote::RaftCommittedLeaderId;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MembershipError<NID>
 where
-    NID: NodeId,
+  NID: NodeId,
 {
-    /// The membership configuration is empty.
-    #[error(transparent)]
-    EmptyMembership(#[from] EmptyMembership),
+  /// The membership configuration is empty.
+  #[error(transparent)]
+  EmptyMembership(#[from] EmptyMembership),
 
-    /// A required node was not found.
-    #[error(transparent)]
-    NodeNotFound(#[from] NodeNotFound<NID>),
+  /// A required node was not found.
+  #[error(transparent)]
+  NodeNotFound(#[from] NodeNotFound<NID>),
 }
 
 /// Translate a membership validation failure into a rejected change request.
@@ -36,15 +35,15 @@ where
 /// `Operation::None` on this path, so nothing diagnostic is lost.
 impl<CLID, NID> From<MembershipError<NID>> for ChangeMembershipError<CLID, NID>
 where
-    CLID: RaftCommittedLeaderId,
-    NID: NodeId,
+  CLID: RaftCommittedLeaderId,
+  NID: NodeId,
 {
-    fn from(me: MembershipError<NID>) -> Self {
-        match me {
-            MembershipError::EmptyMembership(e) => ChangeMembershipError::EmptyMembership(e),
-            MembershipError::NodeNotFound(e) => {
-                ChangeMembershipError::LearnerNotFound(LearnerNotFound { node_id: e.node_id })
-            }
-        }
+  fn from(me: MembershipError<NID>) -> Self {
+    match me {
+      MembershipError::EmptyMembership(e) => ChangeMembershipError::EmptyMembership(e),
+      MembershipError::NodeNotFound(e) => {
+        ChangeMembershipError::LearnerNotFound(LearnerNotFound { node_id: e.node_id })
+      }
     }
+  }
 }

@@ -1,12 +1,12 @@
-use crate::RaftTypeConfig;
-use crate::entry::RaftEntry;
-use crate::raft::responder::core_responder::CoreResponder;
-use crate::storage::ApplyResponder;
-use crate::storage::apply_responder_inner::ApplyResponderInner;
-use crate::type_config::alias::EntryOf;
-use std::fmt::Display;
-use std::fmt::Formatter;
-use std::fmt::Result as FmtResult;
+use std::fmt::{Display, Formatter, Result as FmtResult};
+
+use crate::{
+  RaftTypeConfig,
+  entry::RaftEntry,
+  raft::responder::core_responder::CoreResponder,
+  storage::{ApplyResponder, apply_responder_inner::ApplyResponderInner},
+  type_config::alias::EntryOf,
+};
 
 pub type EntryResponder<C> = (EntryOf<C>, Option<ApplyResponder<C>>);
 
@@ -20,48 +20,48 @@ pub type EntryResponder<C> = (EntryOf<C>, Option<ApplyResponder<C>>);
 /// This is an internal implementation detail. User code works with the public
 /// [`EntryResponder`] type alias directly.
 pub(crate) struct EntryResponderBuilder<C: RaftTypeConfig> {
-    pub(crate) entry: C::Entry,
-    pub(crate) responder: Option<CoreResponder<C>>,
+  pub(crate) entry: C::Entry,
+  pub(crate) responder: Option<CoreResponder<C>>,
 }
 
 impl<C: RaftTypeConfig> EntryResponderBuilder<C> {
-    /// Consume this item and return the entry and optional responder.
-    ///
-    /// Returns `None` for the responder when this entry has no client waiting for a response
-    /// (e.g., entries being applied on followers).
-    ///
-    /// This method extracts the log_id and membership from the entry to construct
-    /// the appropriate [`ApplyResponder`] wrapper when a responder is present.
-    pub(crate) fn into_parts(self) -> (C::Entry, Option<ApplyResponder<C>>) {
-        let responder = match self.responder {
-            None => return (self.entry, None),
-            Some(r) => r,
-        };
+  /// Consume this item and return the entry and optional responder.
+  ///
+  /// Returns `None` for the responder when this entry has no client waiting for a response
+  /// (e.g., entries being applied on followers).
+  ///
+  /// This method extracts the log_id and membership from the entry to construct
+  /// the appropriate [`ApplyResponder`] wrapper when a responder is present.
+  pub(crate) fn into_parts(self) -> (C::Entry, Option<ApplyResponder<C>>) {
+    let responder = match self.responder {
+      None => return (self.entry, None),
+      Some(r) => r,
+    };
 
-        let log_id = self.entry.log_id();
-        let membership = self.entry.get_membership();
+    let log_id = self.entry.log_id();
+    let membership = self.entry.get_membership();
 
-        let inner = match membership {
-            Some(membership) => ApplyResponderInner::Membership {
-                log_id,
-                membership,
-                responder,
-            },
-            None => ApplyResponderInner::Normal { log_id, responder },
-        };
+    let inner = match membership {
+      Some(membership) => ApplyResponderInner::Membership {
+        log_id,
+        membership,
+        responder,
+      },
+      None => ApplyResponderInner::Normal { log_id, responder },
+    };
 
-        (self.entry, Some(ApplyResponder { inner }))
-    }
+    (self.entry, Some(ApplyResponder { inner }))
+  }
 }
 
 impl<C: RaftTypeConfig> Display for EntryResponderBuilder<C> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(
-            f,
-            "EntryResponderBuilder(log_id={}, has_responder={}, has_membership={})",
-            self.entry.log_id(),
-            self.responder.is_some(),
-            self.entry.get_membership().is_some()
-        )
-    }
+  fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    write!(
+      f,
+      "EntryResponderBuilder(log_id={}, has_responder={}, has_membership={})",
+      self.entry.log_id(),
+      self.responder.is_some(),
+      self.entry.get_membership().is_some()
+    )
+  }
 }

@@ -1,5 +1,4 @@
-use std::fmt::Debug;
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 
 use crate::base::OptionalFeatures;
 
@@ -38,11 +37,11 @@ use crate::base::OptionalFeatures;
 /// [`RaftLeaderId`]: crate::vote::RaftLeaderId
 pub trait RaftCommittedLeaderId
 where
-    Self: OptionalFeatures + Ord + Clone + Debug + Display + 'static,
+  Self: OptionalFeatures + Ord + Clone + Debug + Display + 'static,
 {
 }
 
 impl<T> RaftCommittedLeaderId for T where
-    T: OptionalFeatures + Ord + Clone + Debug + Display + 'static
+  T: OptionalFeatures + Ord + Clone + Debug + Display + 'static
 {
 }

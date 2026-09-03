@@ -1,10 +1,10 @@
-use std::fmt::Debug;
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 
-use crate::NodeId;
-use crate::base::OptionalFeatures;
-use crate::vote::RaftCommittedLeaderId;
-use crate::vote::RaftTerm;
+use crate::{
+  NodeId,
+  base::OptionalFeatures,
+  vote::{RaftCommittedLeaderId, RaftTerm},
+};
 
 /// A Leader identifier in a Raft cluster.
 ///
@@ -30,46 +30,46 @@ use crate::vote::RaftTerm;
 /// [`Vote`]: crate::vote::Vote
 pub trait RaftLeaderId
 where
-    Self: OptionalFeatures + PartialOrd + Eq + Clone + Debug + Display + 'static,
-    Self: PartialOrd<Self::Committed>,
+  Self: OptionalFeatures + PartialOrd + Eq + Clone + Debug + Display + 'static,
+  Self: PartialOrd<Self::Committed>,
 {
-    /// The term type used by this leader ID.
-    type Term: RaftTerm;
+  /// The term type used by this leader ID.
+  type Term: RaftTerm;
 
-    /// The node ID type used by this leader ID.
-    type NodeId: NodeId;
+  /// The node ID type used by this leader ID.
+  type NodeId: NodeId;
 
-    /// The committed version of this leader ID.
-    ///
-    /// A simple implementation of this trait would return `Self` as the committed version.
-    type Committed: RaftCommittedLeaderId;
+  /// The committed version of this leader ID.
+  ///
+  /// A simple implementation of this trait would return `Self` as the committed version.
+  type Committed: RaftCommittedLeaderId;
 
-    /// Create a new leader ID for the given term and node.
-    fn new(term: Self::Term, node_id: Self::NodeId) -> Self;
+  /// Create a new leader ID for the given term and node.
+  fn new(term: Self::Term, node_id: Self::NodeId) -> Self;
 
-    /// Get the term number of this leader
-    fn term(&self) -> Self::Term;
+  /// Get the term number of this leader
+  fn term(&self) -> Self::Term;
 
-    /// Get the node ID of this leader
-    fn node_id(&self) -> &Self::NodeId;
+  /// Get the node ID of this leader
+  fn node_id(&self) -> &Self::NodeId;
 
-    /// Convert this leader ID to a committed leader ID.
-    ///
-    /// This is used when it has been granted by a quorum.
-    fn to_committed(&self) -> Self::Committed;
+  /// Convert this leader ID to a committed leader ID.
+  ///
+  /// This is used when it has been granted by a quorum.
+  fn to_committed(&self) -> Self::Committed;
 
-    /// Create a LeaderId with default Term and specified Node ID
-    fn new_with_default_term(node_id: Self::NodeId) -> Self {
-        Self::new(Self::Term::default(), node_id)
-    }
+  /// Create a LeaderId with default Term and specified Node ID
+  fn new_with_default_term(node_id: Self::NodeId) -> Self {
+    Self::new(Self::Term::default(), node_id)
+  }
 
-    /// Create a new committed leader ID.
-    fn new_committed(term: Self::Term, node_id: Self::NodeId) -> Self::Committed {
-        Self::new(term, node_id).to_committed()
-    }
+  /// Create a new committed leader ID.
+  fn new_committed(term: Self::Term, node_id: Self::NodeId) -> Self::Committed {
+    Self::new(term, node_id).to_committed()
+  }
 
-    /// Get the node ID of this leader as an owned value.
-    fn to_node_id(&self) -> Self::NodeId {
-        self.node_id().clone()
-    }
+  /// Get the node ID of this leader as an owned value.
+  fn to_node_id(&self) -> Self::NodeId {
+    self.node_id().clone()
+  }
 }

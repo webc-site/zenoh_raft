@@ -1,7 +1,6 @@
 use display_more::DisplayOptionExt;
 
-use crate::LogId;
-use crate::vote::RaftCommittedLeaderId;
+use crate::{LogId, vote::RaftCommittedLeaderId};
 
 /// The leader has not yet committed a log entry proposed in its own term.
 ///
@@ -53,11 +52,11 @@ use crate::vote::RaftCommittedLeaderId;
 )]
 pub struct UncommittedLeaderLog<CLID>
 where
-    CLID: RaftCommittedLeaderId,
+  CLID: RaftCommittedLeaderId,
 {
-    /// The greatest log id a quorum granted, i.e. the cluster-wide committed log id.
-    pub committed: Option<LogId<CLID>>,
+  /// The greatest log id a quorum granted, i.e. the cluster-wide committed log id.
+  pub committed: Option<LogId<CLID>>,
 
-    /// The blank log id the current leader proposed when it was established.
-    pub leader_log_id: LogId<CLID>,
+  /// The blank log id the current leader proposed when it was established.
+  pub leader_log_id: LogId<CLID>,
 }
