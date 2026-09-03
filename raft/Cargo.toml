@@ -56,7 +56,7 @@ version = "1.10.0"
 default-features = false
 
 [dependencies.zenoh_raft_macros]
-version = "0.1.5"
+version = "0.1.6"
 path = "../macros"
 
 [features]
